@@ -1,0 +1,44 @@
+# Soccer Analysis System - Requirements
+# Python 3.11 or higher recommended
+#
+# Installation:
+# 1. Create virtual environment: python -m venv venv
+# 2. Activate it: .\venv\Scripts\Activate (Windows) or source venv/bin/activate (Linux/Mac)
+# 3. Install requirements: pip install -r requirements.txt
+#
+# Note: This project includes custom sports compatibility module (tactical_analysis/sports_compat.py)
+# that replaces the deprecated 'sports' module from older supervision versions.
+
+# Core Computer Vision & ML
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.5.5,<4.10.0  # Compatible with numpy<2.0. Use either opencv-python OR opencv-python-headless, not both
+supervision>=0.26.0
+
+# Transformers & NLP (for SigLIP team assignment)
+transformers>=4.30.0
+sentencepiece>=0.2.0
+protobuf>=3.20.0
+
+# Machine Learning & Clustering
+scikit-learn>=1.0.0
+umap-learn>=0.5.0
+
+# Data Processing
+numpy>=1.20.0,<2.0.0  # Keep <2.0 for opencv compatibility
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Image Processing
+pillow>=9.4.0
+
+# Utilities
+tqdm>=4.62.0
+more-itertools>=8.0.0
+huggingface-hub>=0.16.0
+pyyaml>=5.3
+matplotlib>=3.6.0
+
+# Optional: For better performance
+# numba>=0.50.0  # Uncomment if needed for numerical optimizations
