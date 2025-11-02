@@ -21,16 +21,24 @@ class PassDetector:
     with validation for minimum distance and possession duration.
     """
 
-    def __init__(self, min_pass_distance: float = 3.0, min_possession_duration: float = 0.5):
+    def __init__(self,
+                 min_pass_distance: float = 2.5,
+                 min_possession_duration: float = 0.3,
+                 max_gap_frames: int = 30,
+                 max_pass_distance: float = 40.0):
         """
         Initialize the pass detector.
 
         Args:
-            min_pass_distance: Minimum distance in meters between players to count as pass (default: 3.0m)
-            min_possession_duration: Minimum duration in seconds for valid possession (default: 0.5s)
+            min_pass_distance: Minimum distance in meters between players to count as pass (default: 2.5m)
+            min_possession_duration: Minimum duration in seconds for valid possession (default: 0.3s)
+            max_gap_frames: Maximum frames between possessions to count as pass (default: 30 frames ~1s)
+            max_pass_distance: Maximum distance in meters for realistic passes (default: 40.0m)
         """
         self.min_pass_distance = min_pass_distance
         self.min_possession_duration = min_possession_duration
+        self.max_gap_frames = max_gap_frames
+        self.max_pass_distance = max_pass_distance
 
     def _calculate_distance(self, point1: np.ndarray, point2: np.ndarray) -> float:
         """Calculate Euclidean distance between two points in meters."""
@@ -71,6 +79,11 @@ class PassDetector:
         for i in range(len(sorted_events) - 1):
             current_event = sorted_events[i]
             next_event = sorted_events[i + 1]
+
+            # Check gap between possessions (ball travel time)
+            gap_frames = next_event['start_frame'] - current_event['end_frame']
+            if gap_frames > self.max_gap_frames:
+                continue
 
             # Check if both possessions meet minimum duration requirement
             if (current_event['duration_seconds'] < self.min_possession_duration or
@@ -116,14 +129,15 @@ class PassDetector:
             # Calculate distance between players
             pass_distance = self._calculate_distance(passer_pos, receiver_pos)
 
-            # Validate minimum pass distance
-            if pass_distance < self.min_pass_distance:
+            # Validate pass distance range (minimum and maximum)
+            if pass_distance < self.min_pass_distance or pass_distance > self.max_pass_distance:
                 continue
 
-            # Calculate pass timestamp
+            # Calculate pass timestamp and ball travel time
             pass_timestamp = passer_frame / fps
+            ball_travel_time = gap_frames / fps
 
-            # Create pass event
+            # Create pass event with enhanced metadata
             pass_event = {
                 'frame': int(passer_frame),
                 'timestamp': round(pass_timestamp, 2),
@@ -132,7 +146,9 @@ class PassDetector:
                 'team': int(passer_team),
                 'distance_m': round(pass_distance, 2),
                 'start_position': [round(float(passer_pos[0]), 2), round(float(passer_pos[1]), 2)],
-                'end_position': [round(float(receiver_pos[0]), 2), round(float(receiver_pos[1]), 2)]
+                'end_position': [round(float(receiver_pos[0]), 2), round(float(receiver_pos[1]), 2)],
+                'ball_travel_time_s': round(ball_travel_time, 2),
+                'gap_frames': int(gap_frames)
             }
 
             passes.append(pass_event)
@@ -166,3 +182,48 @@ class PassDetector:
             player_pass_counts[to_player]['passes_received'] += 1
 
         return player_pass_counts
+
+    def verify_passes_with_touches(self, passes: List[Dict], touch_frames: Dict[int, List[int]],
+                                   tolerance_frames: int = 15) -> List[Dict]:
+        """
+        Verify passes by correlating with actual player touches.
+
+        Adds verification metadata to each pass indicating if the passer and receiver
+        had registered touches near the pass frame.
+
+        Args:
+            passes: List of pass events from detect_passes
+            touch_frames: Dictionary {player_id: [frame_indices]} from PlayerBallAssigner
+            tolerance_frames: Number of frames to search around pass frame (default: 15 ~0.5s at 30fps)
+
+        Returns:
+            List of pass events with added 'passer_touch_verified' and 'receiver_touch_verified' fields
+        """
+        verified_passes = []
+
+        for pass_event in passes.copy():
+            from_player = pass_event['from_player']
+            to_player = pass_event['to_player']
+            pass_frame = pass_event['frame']
+            receive_frame = pass_frame + pass_event.get('gap_frames', 0)
+
+            # Check if passer had touch near pass frame
+            passer_touch_verified = False
+            if from_player in touch_frames:
+                passer_touches = touch_frames[from_player]
+                passer_touch_verified = any(abs(t - pass_frame) <= tolerance_frames for t in passer_touches)
+
+            # Check if receiver had touch near receive frame
+            receiver_touch_verified = False
+            if to_player in touch_frames:
+                receiver_touches = touch_frames[to_player]
+                receiver_touch_verified = any(abs(t - receive_frame) <= tolerance_frames for t in receiver_touches)
+
+            # Add verification metadata
+            pass_event['passer_touch_verified'] = passer_touch_verified
+            pass_event['receiver_touch_verified'] = receiver_touch_verified
+            pass_event['fully_verified'] = passer_touch_verified and receiver_touch_verified
+
+            verified_passes.append(pass_event)
+
+        return verified_passes

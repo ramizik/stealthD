@@ -40,7 +40,13 @@ class MetricsCalculator:
         self.field_dimensions = field_dimensions
         self.speed_calculator = SpeedCalculator(field_dimensions, fps)
         self.possession_tracker = PossessionTracker(possession_threshold=2.0, min_possession_frames=5)
-        self.pass_detector = PassDetector(min_pass_distance=3.0, min_possession_duration=0.5)
+        # Enhanced pass detector with improved sensitivity
+        self.pass_detector = PassDetector(
+            min_pass_distance=2.5,      # Catch shorter passes (reduced from 3.0m)
+            min_possession_duration=0.3, # Allow quicker touches (reduced from 0.5s)
+            max_gap_frames=30,           # Ball can be in air up to 1 second
+            max_pass_distance=40.0       # Ignore unrealistic long distances
+        )
         self.ball_assigner = PlayerBallAssigner(max_ball_distance=2.5)
 
     def _calculate_ball_field_coordinates(self, ball_tracks: Dict, view_transformers: Dict,
@@ -154,6 +160,12 @@ class MetricsCalculator:
         # Count touches from frame-by-frame assignments
         player_touches = self.ball_assigner.count_player_touches(ball_assignments)
         touch_frames = self.ball_assigner.get_player_touch_frames(ball_assignments)
+
+        # Step 6.5: Verify passes with touch correlation
+        print("  - Verifying passes with player touches...")
+        passes = self.pass_detector.verify_passes_with_touches(passes, touch_frames, tolerance_frames=15)
+        verified_count = sum(1 for p in passes if p.get('fully_verified', False))
+        print(f"    {verified_count}/{len(passes)} passes fully verified with touches")
 
         # Step 7: Aggregate player analytics
         print("  - Aggregating player analytics...")

@@ -7,6 +7,8 @@ import numpy as np
 import time
 import supervision as sv
 from tqdm import tqdm
+import pickle
+import os
 
 from pipelines.detection_pipeline import DetectionPipeline
 from pipelines.processing_pipeline import ProcessingPipeline
@@ -101,6 +103,7 @@ class TrackingPipeline:
     def train_team_assignment_models(self, video_path):
         """
         Train UMAP and K-means models for team assignment.
+        Uses cache if available to speed up repeated runs on same video.
 
         Args:
             video_path: Path to training video
@@ -108,6 +111,43 @@ class TrackingPipeline:
         Returns:
             Trained clustering models
         """
+        # Check for cached models
+        video_path_obj = Path(video_path)
+        cache_dir = video_path_obj.parent / "cache"
+        cache_dir.mkdir(exist_ok=True)  # Create cache directory if it doesn't exist
+        cache_path = cache_dir / f"{video_path_obj.stem}_team_models_cache.pkl"
+
+        # Get video info for cache validation
+        video_info = sv.VideoInfo.from_video_path(video_path)
+
+        if os.path.exists(cache_path):
+            print("  Checking cached team assignment models...")
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached_data = pickle.load(f)
+
+                # Validate cache matches current video
+                if (cached_data.get('total_frames') == video_info.total_frames and
+                    cached_data.get('video_width') == video_info.width and
+                    cached_data.get('video_height') == video_info.height):
+
+                    # Load cached models
+                    reducer = cached_data['reducer']
+                    cluster_model = cached_data['cluster_model']
+
+                    # Update clustering manager with cached models
+                    self.clustering_manager.reducer = reducer
+                    self.clustering_manager.cluster_model = cluster_model
+                    self.clustering_manager.is_trained = True
+
+                    print(f"  ✓ Cache loaded successfully - skipping team assignment training")
+                    return cached_data.get('cluster_labels'), reducer, cluster_model
+                else:
+                    print(f"  Cache mismatch - reprocessing...")
+            except Exception as e:
+                print(f"  Error loading cache: {e} - reprocessing...")
+
+        # Train models (cache miss or invalid cache)
         print("Training team assignment models...")
         training_time = time.time()
 
@@ -119,6 +159,23 @@ class TrackingPipeline:
 
         training_time = time.time() - training_time
         print(f"Team assignment training completed in {training_time:.2f}s")
+
+        # Save cache
+        print(f"  Saving team assignment models cache to: {cache_path.name}")
+        try:
+            cached_data = {
+                'reducer': reducer,
+                'cluster_model': cluster_model,
+                'cluster_labels': cluster_labels,
+                'total_frames': video_info.total_frames,
+                'video_width': video_info.width,
+                'video_height': video_info.height
+            }
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cached_data, f)
+            print(f"  Cache saved successfully")
+        except Exception as e:
+            print(f"  Warning: Failed to save cache: {e}")
 
         return cluster_labels, reducer, cluster_model
 

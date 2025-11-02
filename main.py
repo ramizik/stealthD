@@ -11,6 +11,8 @@ import time
 from tqdm import tqdm
 import supervision as sv
 import json
+import pickle
+import os
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -78,39 +80,38 @@ class CompleteSoccerAnalysisPipeline:
         frames = self.processing_pipeline.read_video_frames(video_path, frame_count)
         print(f"Loaded {len(frames)} frames for processing")
 
+        # Setup cache directory
+        video_path_obj = Path(video_path)
+        cache_dir = video_path_obj.parent / "cache"
+        cache_dir.mkdir(exist_ok=True)  # Create cache directory if it doesn't exist
+
+        # Check for cached frame processing data
+        cache_path = cache_dir / f"{video_path_obj.stem}_frame_cache.pkl"
+
         # Step 4: Process all frames with detections, tracking, and team assignment
         print("\n[Step 4/8] Processing frames with detections and tracking...")
-        view_transformers = {}  # Store view transformers for metrics calculation
-        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
 
-        # Initialize homography transformer for view transformers
-        from tactical_analysis.homography import HomographyTransformer
-        homography_transformer = HomographyTransformer()
+        if os.path.exists(cache_path):
+            print(f"  Checking cached frame processing data: {cache_path.name}")
+            try:
+                with open(cache_path, 'rb') as f:
+                    cached_data = pickle.load(f)
 
-        for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
-
-            # Detect keypoints and objects
-            keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
-            player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
-
-            # Store view transformer for this frame (for metrics calculation)
-            if keypoints is not None:
-                try:
-                    view_transformer = homography_transformer.transform_to_pitch_keypoints(keypoints)
-                    view_transformers[i] = view_transformer
-                except:
-                    view_transformers[i] = None
-            else:
-                view_transformers[i] = None
-
-            # Update with tracking
-            player_detections = self.tracking_pipeline.tracking_callback(player_detections)
-
-            # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
-
-            # Store tracks for interpolation
-            all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
+                # Validate cache matches current video
+                if (cached_data.get('num_frames') == len(frames) and
+                    cached_data.get('frame_count') == frame_count):
+                    all_tracks = cached_data['all_tracks']
+                    view_transformers = cached_data['view_transformers']
+                    print(f"  ✓ Cache loaded successfully - skipping frame processing")
+                else:
+                    print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {len(frames)}, "
+                          f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
+                    all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+            except Exception as e:
+                print(f"  Error loading cache: {e} - reprocessing...")
+                all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+        else:
+            all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
 
         # Step 5: Ball track interpolation
         print("\n[Step 5/8] Interpolating ball tracks...")
@@ -121,7 +122,7 @@ class CompleteSoccerAnalysisPipeline:
         from camera_analysis import CameraMovementEstimator
 
         camera_estimator = CameraMovementEstimator(frames[0])
-        stub_path = f"{video_path}_camera_movement.pkl"
+        stub_path = str(cache_dir / f"{video_path_obj.stem}_camera_movement.pkl")
         camera_movement = camera_estimator.get_camera_movement(
             frames, read_from_stub=True, stub_path=stub_path
         )
@@ -429,6 +430,57 @@ class CompleteSoccerAnalysisPipeline:
             analysis_data["player_analytics"] = convert_to_serializable(metrics_data.get('player_analytics', {}))
 
         return analysis_data
+
+    def _process_frames(self, frames, video_path, cache_path, frame_count):
+        """Process all frames with detections, tracking, and team assignment."""
+        view_transformers = {}
+        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
+
+        # Initialize homography transformer for view transformers
+        from tactical_analysis.homography import HomographyTransformer
+        homography_transformer = HomographyTransformer()
+
+        for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
+
+            # Detect keypoints and objects
+            keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
+            player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+
+            # Store view transformer for this frame (for metrics calculation)
+            if keypoints is not None:
+                try:
+                    view_transformer = homography_transformer.transform_to_pitch_keypoints(keypoints)
+                    view_transformers[i] = view_transformer
+                except:
+                    view_transformers[i] = None
+            else:
+                view_transformers[i] = None
+
+            # Update with tracking
+            player_detections = self.tracking_pipeline.tracking_callback(player_detections)
+
+            # Team assignment
+            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
+
+            # Store tracks for interpolation
+            all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
+
+        # Save cache
+        print(f"  Saving frame processing cache to: {cache_path.name}")
+        try:
+            cached_data = {
+                'all_tracks': all_tracks,
+                'view_transformers': view_transformers,
+                'num_frames': len(frames),
+                'frame_count': frame_count  # Store frame_count to validate cache
+            }
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cached_data, f)
+            print(f"  Cache saved successfully")
+        except Exception as e:
+            print(f"  Warning: Failed to save cache: {e}")
+
+        return all_tracks, view_transformers
 
     def _calculate_statistics(self, all_tracks, num_frames):
         """
