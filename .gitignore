@@ -172,8 +172,10 @@ CLAUDE.md
 *.png
 .claude*
 
+
+# Development
 input_videos/
+output_videos/
 .cursor/
 .vscode/
-
-output_videos/
+.github/

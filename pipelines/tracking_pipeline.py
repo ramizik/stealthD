@@ -9,6 +9,8 @@ import supervision as sv
 from tqdm import tqdm
 import pickle
 import os
+import torch
+import gc
 
 from pipelines.detection_pipeline import DetectionPipeline
 from pipelines.processing_pipeline import ProcessingPipeline
@@ -92,6 +94,7 @@ class TrackingPipeline:
 
         # Extract player crops
         crops = []
+        frame_count = 0
         for frame in tqdm(frame_generator, desc='collecting_crops',
                          mininterval=2.0, ncols=100,
                          bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]'):
@@ -99,7 +102,20 @@ class TrackingPipeline:
             cropped_images = self.clustering_manager.embedding_extractor.get_player_crops(frame, player_detections)
             crops += cropped_images
 
+            frame_count += 1
+            # Periodic GPU memory cleanup every 50 frames
+            if frame_count % 50 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+
         print(f"Collected {len(crops)} player crops")
+
+        # Final cleanup after crop collection
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
         return crops
 
     def train_team_assignment_models(self, video_path):
@@ -158,6 +174,10 @@ class TrackingPipeline:
 
         # Train clustering models
         cluster_labels, reducer, cluster_model = self.clustering_manager.train_clustering_models(crops)
+
+        # Clear crops from memory after training
+        del crops
+        gc.collect()
 
         training_time = time.time() - training_time
         print(f"Team assignment training completed in {training_time:.2f}s")
@@ -319,6 +339,12 @@ class TrackingPipeline:
             # Convert detections to structured track format
             tracks = self.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, tracks, index)
 
+            # Periodic GPU memory cleanup every 100 frames
+            if (index + 1) % 100 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+
         return tracks
 
     def annotate_frames(self, frames, tracks):
@@ -365,6 +391,12 @@ class TrackingPipeline:
                 frame, player_detections, ball_detections, referee_detections
             )
             annotated_frames.append(annotated_frame)
+
+            # Periodic memory cleanup every 100 frames
+            if (index + 1) % 100 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
 
         return annotated_frames
 

@@ -9,6 +9,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from more_itertools import chunked
+import gc
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -61,7 +62,7 @@ class EmbeddingExtractor:
 
     def get_embeddings(self, image_batches):
         """
-        Extract SigLIP embeddings from image batches.
+        Extract SigLIP embeddings from image batches with memory management.
 
         Args:
             image_batches: Batched images for processing
@@ -71,12 +72,26 @@ class EmbeddingExtractor:
         """
         data = []
         with torch.no_grad():
-            for batch in tqdm(image_batches, desc='extracting_embeddings',
+            for batch_idx, batch in enumerate(tqdm(image_batches, desc='extracting_embeddings',
                             mininterval=2.0, ncols=100,
-                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]'):
+                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]')):
                 inputs = self.processor(images=batch, return_tensors="pt").to(device)
                 outputs = self.model(**inputs)
                 embeddings = torch.mean(outputs.last_hidden_state, dim=1).cpu().numpy()
                 data.append(embeddings)
+
+                # Clear GPU cache periodically to prevent memory buildup
+                if (batch_idx + 1) % 10 == 0:
+                    del inputs, outputs
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    gc.collect()
+
         data = np.concatenate(data, axis=0)
+
+        # Final cleanup after embedding extraction
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
         return data

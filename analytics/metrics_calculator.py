@@ -13,6 +13,7 @@ sys.path.append(str(PROJECT_DIR))
 import numpy as np
 from typing import Dict, Tuple
 import supervision as sv
+import gc
 
 from .speed_calculator import SpeedCalculator
 from .possession_tracker import PossessionTracker
@@ -131,11 +132,17 @@ class MetricsCalculator:
             player_tracks, global_mapper, video_dimensions
         )
 
+        # Clear memory after speed calculation
+        gc.collect()
+
         # Step 2: Calculate ball field coordinates
         print("  - Calculating ball field coordinates...")
         ball_field_coords = self._calculate_ball_field_coordinates(
             ball_tracks, global_mapper, video_dimensions
         )
+
+        # Clear memory after ball coordinate calculation
+        gc.collect()
 
         # Step 3: Track ball possession
         print("  - Tracking ball possession...")
@@ -148,6 +155,9 @@ class MetricsCalculator:
             possession_events, team_assignments
         )
 
+        # Clear memory after possession tracking
+        gc.collect()
+
         # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
         print("  - Assigning ball to players frame-by-frame...")
         ball_assignments = self.ball_assigner.assign_ball_for_all_frames(
@@ -157,6 +167,9 @@ class MetricsCalculator:
         # Count touches from frame-by-frame assignments
         player_touches = self.ball_assigner.count_player_touches(ball_assignments)
         touch_frames = self.ball_assigner.get_player_touch_frames(ball_assignments)
+
+        # Clear memory after ball assignment
+        gc.collect()
 
         # Step 5: Detect passes with HYBRID VALIDATION (possession + touches + velocity)
         print("  - Detecting passes with hybrid validation...")
@@ -175,6 +188,9 @@ class MetricsCalculator:
             avg_confidence = sum(p.get('confidence_score', 0) for p in passes) / len(passes)
             print(f"    {len(passes)} passes detected ({hybrid_validated} hybrid-validated, avg confidence: {avg_confidence:.2f})")
 
+        # Clear memory after pass detection
+        gc.collect()
+
         # Step 7: Aggregate player analytics
         print("  - Aggregating player analytics...")
         player_analytics = self._aggregate_player_analytics(
@@ -182,6 +198,9 @@ class MetricsCalculator:
         )
 
         print(f"Analytics complete: {len(player_analytics)} players, {len(passes)} passes detected, {sum(player_touches.values())} total touches")
+
+        # Final cleanup
+        gc.collect()
 
         return {
             'fps': self.fps,

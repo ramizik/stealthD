@@ -48,7 +48,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video path
 # UPDATE THIS: Point to your actual test video file
-test_video = PROJECT_DIR / r"input_videos\sample_2.mp4"
+test_video = PROJECT_DIR / r"input_videos\sample_3.mp4"
 
 # Alternative video paths (examples)
 # test_video = PROJECT_DIR / "test_videos/sample.mp4"
@@ -98,7 +98,7 @@ CLASS_COLORS = {
 # =============================================================================
 
 # GPU settings
-USE_GPU = True                    # Set to False to force CPU usage
+REQUIRE_GPU = True                # If True, script will exit if GPU is not available
 GPU_DEVICE = 0                    # GPU device index (if multiple GPUs)
 
 # Processing settings
