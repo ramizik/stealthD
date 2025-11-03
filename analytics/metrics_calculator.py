@@ -56,14 +56,14 @@ class MetricsCalculator:
             max_ball_distance=2.0  # Reduced from 2.5m for more accurate touch detection
         )
 
-    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, view_transformers: Dict,
+    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, global_mapper,
                                          video_dimensions: Tuple[int, int]) -> Dict:
         """
-        Calculate field coordinates for ball positions.
+        Calculate field coordinates for ball positions using global homography.
 
         Args:
             ball_tracks: Dictionary {frame_idx: [x1, y1, x2, y2]}
-            view_transformers: Dictionary {frame_idx: ViewTransformer or None}
+            global_mapper: GlobalHomographyMapper object
             video_dimensions: (width, height) of video in pixels
 
         Returns:
@@ -80,27 +80,25 @@ class MetricsCalculator:
             y_center = (bbox[1] + bbox[3]) / 2
             ball_center = np.array([[x_center, y_center]])
 
-            # Get view transformer for this frame
-            view_transformer = view_transformers.get(frame_idx, None)
-
-            # Convert to field coordinates
+            # Convert to field coordinates using global homography
             field_coord, _ = self.speed_calculator.calculate_field_coordinates(
-                ball_center, view_transformer, video_dimensions, frame_idx
+                ball_center, global_mapper, video_dimensions, frame_idx
             )
 
-            if len(field_coord) > 0:
+            # Skip if conversion failed or is low confidence
+            if field_coord is not None and len(field_coord) > 0:
                 ball_field_coords[int(frame_idx)] = [float(field_coord[0][0]), float(field_coord[0][1])]
 
         return ball_field_coords
 
-    def calculate_all_metrics(self, all_tracks: Dict, view_transformers: Dict,
+    def calculate_all_metrics(self, all_tracks: Dict, global_mapper,
                              video_info: sv.VideoInfo) -> Dict:
         """
-        Calculate all analytics metrics from tracking data.
+        Calculate all analytics metrics from tracking data using global homography.
 
         Args:
             all_tracks: Dictionary with keys 'player', 'ball', 'referee', 'player_classids'
-            view_transformers: Dictionary {frame_idx: ViewTransformer or None}
+            global_mapper: GlobalHomographyMapper object
             video_info: Video information object from supervision
 
         Returns:
@@ -116,7 +114,7 @@ class MetricsCalculator:
                 'player_analytics': {...}
             }
         """
-        print("Calculating analytics metrics...")
+        print("Calculating analytics metrics with global homography...")
 
         # Extract data from all_tracks
         player_tracks = all_tracks.get('player', {})
@@ -129,18 +127,14 @@ class MetricsCalculator:
         # Step 1: Calculate player speeds and field coordinates
         print("  - Calculating player speeds and field coordinates...")
 
-        # DEBUG: Count non-None transformers
-        valid_transformers = sum(1 for t in view_transformers.values() if t is not None)
-        print(f"     Valid transformers: {valid_transformers}/{len(view_transformers)} frames")
-
         player_speeds = self.speed_calculator.calculate_speeds(
-            player_tracks, view_transformers, video_dimensions
+            player_tracks, global_mapper, video_dimensions
         )
 
         # Step 2: Calculate ball field coordinates
         print("  - Calculating ball field coordinates...")
         ball_field_coords = self._calculate_ball_field_coordinates(
-            ball_tracks, view_transformers, video_dimensions
+            ball_tracks, global_mapper, video_dimensions
         )
 
         # Step 3: Track ball possession

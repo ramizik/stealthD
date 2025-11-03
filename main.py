@@ -97,21 +97,28 @@ class CompleteSoccerAnalysisPipeline:
                 with open(cache_path, 'rb') as f:
                     cached_data = pickle.load(f)
 
-                # Validate cache matches current video
+                # Check cache version (version 2 uses global mapper)
+                cache_version = cached_data.get('cache_version', 1)
+
+                # Validate cache matches current video and is correct version
                 if (cached_data.get('num_frames') == len(frames) and
-                    cached_data.get('frame_count') == frame_count):
+                    cached_data.get('frame_count') == frame_count and
+                    cache_version == 2):  # Must be version 2 (global mapper)
                     all_tracks = cached_data['all_tracks']
-                    view_transformers = cached_data['view_transformers']
+                    global_mapper = cached_data['global_mapper']
                     print(f"  ✓ Cache loaded successfully - skipping frame processing")
                 else:
-                    print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {len(frames)}, "
-                          f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
-                    all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+                    if cache_version == 1:
+                        print(f"  Old cache format detected (per-frame transformers) - reprocessing with global mapper...")
+                    else:
+                        print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {len(frames)}, "
+                              f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
+                    all_tracks, global_mapper = self._process_frames(frames, video_path, cache_path, frame_count)
             except Exception as e:
                 print(f"  Error loading cache: {e} - reprocessing...")
-                all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+                all_tracks, global_mapper = self._process_frames(frames, video_path, cache_path, frame_count)
         else:
-            all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+            all_tracks, global_mapper = self._process_frames(frames, video_path, cache_path, frame_count)
 
         # Step 5: Ball track interpolation
         print("\n[Step 5/8] Interpolating ball tracks...")
@@ -177,7 +184,7 @@ class CompleteSoccerAnalysisPipeline:
         print(f"    Team 1: {team_summary.get('team_1_count', 0)} players")
 
         # Step 5.5: Calculate analytics metrics (BEFORE camera compensation)
-        # Use original pixel positions with frame-specific view transformers
+        # Use original pixel positions with global homography mapper
         print("\n[Step 5.5/8] Calculating player speeds, possession, and passes...")
         from analytics import MetricsCalculator
 
@@ -185,12 +192,18 @@ class CompleteSoccerAnalysisPipeline:
         metrics_calculator = MetricsCalculator(fps=video_info.fps)
 
         # Calculate speeds using original tracks (not camera-compensated)
-        # Each frame's view transformer already accounts for camera position in that frame
+        # Global homography provides consistent transformation across all frames
         metrics_data = metrics_calculator.calculate_all_metrics(
             all_tracks,
-            view_transformers,
+            global_mapper,  # Changed from view_transformers
             video_info
         )
+
+        # Step 5.55: Print confidence coverage report
+        print("\n[Step 5.55/8] Global homography confidence report...")
+        from tactical_analysis.confidence_visualizer import ConfidenceVisualizer
+        visualizer = ConfidenceVisualizer()
+        visualizer.print_coverage_report(global_mapper)
 
         # Step 5.6: Now apply camera compensation for track stitching and visualization
         print("\n[Step 5.6/8] Applying camera movement compensation for visualization...")
@@ -224,9 +237,9 @@ class CompleteSoccerAnalysisPipeline:
 
         # Step 8: Save analysis data to JSON
         print("\n[Step 8/8] Saving analysis data to JSON...")
-        # Generate JSON path properly (replace extension, not add to .mp4)
-        video_path_obj = Path(video_path)
-        json_output_path = str(video_path_obj.parent / f"{video_path_obj.stem}_analysis_data.json")
+        # Generate JSON paths in same output folder as the video
+        output_path_obj = Path(output_path)
+        json_output_path = str(output_path_obj.parent / f"{output_path_obj.stem}_analysis_data.json")
         analysis_data = self._prepare_analysis_json(all_tracks, total_time, len(frames), metrics_data, id_mapping_info)
 
         # JSON conversion is now handled in _prepare_analysis_json via convert_to_serializable
@@ -254,7 +267,8 @@ class CompleteSoccerAnalysisPipeline:
         llm_formatter = LLMDataFormatter()
         llm_data = llm_formatter.format_for_llm(analysis_data, video_path)
 
-        llm_json_path = str(video_path_obj.parent / f"{video_path_obj.stem}_analysis_data_llm.json")
+        # Save LLM JSON in same output folder as video
+        llm_json_path = str(output_path_obj.parent / f"{output_path_obj.stem}_analysis_data_llm.json")
         with open(llm_json_path, 'w') as f:
             json.dump(llm_data, f, indent=2)
         print(f"LLM-ready compact data saved to: {llm_json_path}")
@@ -433,28 +447,26 @@ class CompleteSoccerAnalysisPipeline:
 
     def _process_frames(self, frames, video_path, cache_path, frame_count):
         """Process all frames with detections, tracking, and team assignment."""
-        view_transformers = {}
         all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
 
-        # Initialize homography transformer for view transformers
-        from tactical_analysis.homography import HomographyTransformer
-        homography_transformer = HomographyTransformer()
+        # Initialize global homography mapper
+        from tactical_analysis.global_homography_mapper import GlobalHomographyMapper
+        global_mapper = GlobalHomographyMapper()
 
-        for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
+        print(f"  [Global Homography] Accumulating keypoints from {len(frames)} frames...")
+
+        # Configure progress bar to update less frequently (every 2 seconds or ~5% of frames)
+        update_interval = max(1, len(frames) // 20)  # Update 20 times max
+        for i, frame in enumerate(tqdm(frames, desc="Processing frames",
+                                       mininterval=2.0, miniters=update_interval,
+                                       ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
 
             # Detect keypoints and objects
             keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
-            # Store view transformer for this frame (for metrics calculation)
-            if keypoints is not None:
-                try:
-                    view_transformer = homography_transformer.transform_to_pitch_keypoints(keypoints)
-                    view_transformers[i] = view_transformer
-                except:
-                    view_transformers[i] = None
-            else:
-                view_transformers[i] = None
+            # Accumulate keypoints for global homography (instead of per-frame transformer)
+            global_mapper.add_frame_keypoints(i, keypoints)
 
             # Update with tracking
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
@@ -465,14 +477,22 @@ class CompleteSoccerAnalysisPipeline:
             # Store tracks for interpolation
             all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
 
-        # Save cache
-        print(f"  Saving frame processing cache to: {cache_path.name}")
+        # Build global homography from all accumulated keypoints
+        print(f"\n  [Step 4.5/8] Building global homography from accumulated keypoints...")
+        homography_success = global_mapper.build_global_homography()
+
+        if not homography_success:
+            print(f"  [WARNING] Failed to build global homography. Analytics may be inaccurate.")
+
+        # Save cache (now includes global mapper instead of per-frame transformers)
+        print(f"\n  Saving frame processing cache to: {cache_path.name}")
         try:
             cached_data = {
                 'all_tracks': all_tracks,
-                'view_transformers': view_transformers,
+                'global_mapper': global_mapper,  # Changed from view_transformers
                 'num_frames': len(frames),
-                'frame_count': frame_count  # Store frame_count to validate cache
+                'frame_count': frame_count,
+                'cache_version': 2  # Version 2 uses global mapper
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cached_data, f)
@@ -480,7 +500,7 @@ class CompleteSoccerAnalysisPipeline:
         except Exception as e:
             print(f"  Warning: Failed to save cache: {e}")
 
-        return all_tracks, view_transformers
+        return all_tracks, global_mapper
 
     def _calculate_statistics(self, all_tracks, num_frames):
         """

@@ -175,3 +175,5 @@ CLAUDE.md
 input_videos/
 .cursor/
 .vscode/
+
+output_videos/

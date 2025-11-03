@@ -21,10 +21,10 @@ import supervision as sv
 
 def load_detection_model(model_path: str) -> YOLO:
     """Load and return a YOLO detection model.
-    
+
     Args:
         model_path: Path to the YOLO model file
-        
+
     Returns:
         YOLO model instance
     """
@@ -34,24 +34,24 @@ def load_detection_model(model_path: str) -> YOLO:
 
 def detect_objects_in_frames(model: YOLO, frames) -> List:
     """Detect objects in video frames using YOLO model.
-    
+
     Args:
         model: Loaded YOLO model
         frames: Video frames or single frame
-        
+
     Returns:
         Detection results from YOLO model
     """
-    return model(frames)
+    return model(frames, verbose=False)
 
 def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
     """Get separated detections for players, ball, and referees.
-    
+
     Args:
         detection_model: Loaded YOLO model
         frame: Input frame as numpy array
         use_slicer: Whether to use inference slicer for large images
-        
+
     Returns:
         Tuple of (player_detections, ball_detections, referee_detections)
     """

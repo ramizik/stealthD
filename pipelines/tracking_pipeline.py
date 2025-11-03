@@ -92,7 +92,9 @@ class TrackingPipeline:
 
         # Extract player crops
         crops = []
-        for frame in tqdm(frame_generator, desc='collecting_crops'):
+        for frame in tqdm(frame_generator, desc='collecting_crops',
+                         mininterval=2.0, ncols=100,
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]'):
             player_detections, _, _ = self.detection_pipeline.detect_frame_objects(frame)
             cropped_images = self.clustering_manager.embedding_extractor.get_player_crops(frame, player_detections)
             crops += cropped_images
@@ -299,7 +301,11 @@ class TrackingPipeline:
             'player_classids': {},
         }
 
-        for index, frame in tqdm(enumerate(frames), total=len(frames)):
+        # Configure progress bar to update less frequently
+        update_interval = max(1, len(frames) // 20)  # Update 20 times max
+        for index, frame in tqdm(enumerate(frames), total=len(frames),
+                                mininterval=2.0, miniters=update_interval,
+                                ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
             # Detection pipeline - detect objects in frame
             player_detections, ball_detections, referee_detections, det_time = self.detection_callback(frame)
 
@@ -329,7 +335,11 @@ class TrackingPipeline:
         print("Annotating frames...")
         annotated_frames = []
 
-        for index, frame in tqdm(enumerate(frames), total=len(frames)):
+        # Configure progress bar to update less frequently
+        update_interval = max(1, len(frames) // 20)  # Update 20 times max
+        for index, frame in tqdm(enumerate(frames), total=len(frames),
+                                mininterval=2.0, miniters=update_interval,
+                                ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
             # Get tracks for this frame
             player_tracks = tracks['player'][index]
             ball_tracks = tracks['ball'][index]
