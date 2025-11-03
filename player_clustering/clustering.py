@@ -25,8 +25,8 @@ class ClusteringManager:
             n_components: Number of components for UMAP reduction
             n_clusters: Number of clusters for K-means (typically 2 for teams)
         """
-        self.reducer = umap.UMAP(n_components=n_components)
-        self.cluster_model = KMeans(n_clusters=n_clusters)
+        self.reducer = umap.UMAP(n_components=n_components, random_state=42)
+        self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
         self.embedding_extractor = EmbeddingExtractor()
         self.fast_feature_extractor = FastFeatureExtractor()
         self.is_trained = False

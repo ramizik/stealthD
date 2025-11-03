@@ -39,15 +39,22 @@ class MetricsCalculator:
         self.fps = fps
         self.field_dimensions = field_dimensions
         self.speed_calculator = SpeedCalculator(field_dimensions, fps)
-        self.possession_tracker = PossessionTracker(possession_threshold=2.0, min_possession_frames=5)
-        # Enhanced pass detector with improved sensitivity
-        self.pass_detector = PassDetector(
-            min_pass_distance=2.5,      # Catch shorter passes (reduced from 3.0m)
-            min_possession_duration=0.3, # Allow quicker touches (reduced from 0.5s)
-            max_gap_frames=30,           # Ball can be in air up to 1 second
-            max_pass_distance=40.0       # Ignore unrealistic long distances
+        # Enhanced possession tracker with aligned parameters
+        self.possession_tracker = PossessionTracker(
+            possession_threshold=2.0,  # Match max_ball_distance for consistent detection
+            min_possession_frames=1  # Capture even brief 1-frame touches (one-touch passes)
         )
-        self.ball_assigner = PlayerBallAssigner(max_ball_distance=2.5)
+        # Enhanced pass detector with hybrid validation
+        self.pass_detector = PassDetector(
+            min_pass_distance=1.0,       # Allow short passes (reduced from 2.5m)
+            min_possession_duration=0.0, # No minimum duration - allow instant one-touch passes
+            max_gap_frames=100,          # Allow up to 4 seconds ball flight time (includes loose balls)
+            max_pass_distance=40.0,      # Ignore unrealistic long distances
+            velocity_threshold=2.0       # Minimum ball speed for valid passes (m/s)
+        )
+        self.ball_assigner = PlayerBallAssigner(
+            max_ball_distance=2.0  # Reduced from 2.5m for more accurate touch detection
+        )
 
     def _calculate_ball_field_coordinates(self, ball_tracks: Dict, view_transformers: Dict,
                                          video_dimensions: Tuple[int, int]) -> Dict:
@@ -77,7 +84,7 @@ class MetricsCalculator:
             view_transformer = view_transformers.get(frame_idx, None)
 
             # Convert to field coordinates
-            field_coord = self.speed_calculator.calculate_field_coordinates(
+            field_coord, _ = self.speed_calculator.calculate_field_coordinates(
                 ball_center, view_transformer, video_dimensions, frame_idx
             )
 
@@ -121,6 +128,11 @@ class MetricsCalculator:
 
         # Step 1: Calculate player speeds and field coordinates
         print("  - Calculating player speeds and field coordinates...")
+
+        # DEBUG: Count non-None transformers
+        valid_transformers = sum(1 for t in view_transformers.values() if t is not None)
+        print(f"     Valid transformers: {valid_transformers}/{len(view_transformers)} frames")
+
         player_speeds = self.speed_calculator.calculate_speeds(
             player_tracks, view_transformers, video_dimensions
         )
@@ -142,16 +154,7 @@ class MetricsCalculator:
             possession_events, team_assignments
         )
 
-        # Step 4: Detect passes
-        print("  - Detecting passes...")
-        passes = self.pass_detector.detect_passes(
-            possession_events, player_speeds, team_assignments, self.fps
-        )
-
-        # Step 5: Count passes per player
-        player_pass_counts = self.pass_detector.count_player_passes(passes)
-
-        # Step 6: Frame-by-frame ball assignment for accurate touch counting
+        # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
         print("  - Assigning ball to players frame-by-frame...")
         ball_assignments = self.ball_assigner.assign_ball_for_all_frames(
             player_tracks, ball_tracks, player_speeds, ball_field_coords
@@ -161,11 +164,22 @@ class MetricsCalculator:
         player_touches = self.ball_assigner.count_player_touches(ball_assignments)
         touch_frames = self.ball_assigner.get_player_touch_frames(ball_assignments)
 
-        # Step 6.5: Verify passes with touch correlation
-        print("  - Verifying passes with player touches...")
-        passes = self.pass_detector.verify_passes_with_touches(passes, touch_frames, tolerance_frames=15)
-        verified_count = sum(1 for p in passes if p.get('fully_verified', False))
-        print(f"    {verified_count}/{len(passes)} passes fully verified with touches")
+        # Step 5: Detect passes with HYBRID VALIDATION (possession + touches + velocity)
+        print("  - Detecting passes with hybrid validation...")
+        passes = self.pass_detector.detect_passes(
+            possession_events, player_speeds, team_assignments, self.fps,
+            ball_field_coords=ball_field_coords,  # For velocity validation
+            ball_assignments=ball_assignments      # For touch validation
+        )
+
+        # Count passes per player
+        player_pass_counts = self.pass_detector.count_player_passes(passes)
+
+        # Report validation statistics
+        if passes:
+            hybrid_validated = sum(1 for p in passes if p.get('validation_method') == 'hybrid')
+            avg_confidence = sum(p.get('confidence_score', 0) for p in passes) / len(passes)
+            print(f"    {len(passes)} passes detected ({hybrid_validated} hybrid-validated, avg confidence: {avg_confidence:.2f})")
 
         # Step 7: Aggregate player analytics
         print("  - Aggregating player analytics...")

@@ -21,13 +21,13 @@ class PossessionTracker:
     transitions between players.
     """
 
-    def __init__(self, possession_threshold: float = 2.0, min_possession_frames: int = 5):
+    def __init__(self, possession_threshold: float = 1.5, min_possession_frames: int = 3):
         """
-        Initialize the possession tracker.
+        Initialize the possession tracker with tighter parameters for improved detection.
 
         Args:
-            possession_threshold: Distance threshold in meters for possession detection (default: 2.0m)
-            min_possession_frames: Minimum consecutive frames to count as valid possession (default: 5)
+            possession_threshold: Distance threshold in meters for possession detection (default: 1.5m)
+            min_possession_frames: Minimum consecutive frames to count as valid possession (default: 3)
         """
         self.possession_threshold = possession_threshold
         self.min_possession_frames = min_possession_frames
