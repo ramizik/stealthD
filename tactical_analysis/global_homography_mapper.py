@@ -641,9 +641,3 @@ class GlobalHomographyMapper:
             'high_confidence_coverage_percent': coverage_percent,
             'grid_dimensions': (self.grid_width, self.grid_height)
         }
-            'high_confidence_coverage_percent': coverage_percent,
-            'grid_dimensions': (self.grid_width, self.grid_height)
-        }
-            'high_confidence_coverage_percent': coverage_percent,
-            'grid_dimensions': (self.grid_width, self.grid_height)
-        }
