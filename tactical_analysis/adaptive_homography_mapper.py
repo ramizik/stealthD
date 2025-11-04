@@ -80,9 +80,10 @@ class AdaptiveHomographyMapper:
             keypoints = yolo_keypoints[0]  # Take first detection
             for kp_idx in range(len(keypoints)):
                 x, y, conf = keypoints[kp_idx]
-                # CRITICAL FIX (from research code): Combined confidence + spatial filtering
-                # Exclude invalid keypoints (x<=1, y<=1) that corrupt homography
-                if conf > 0.3 and x > 1 and y > 1:  # Lower threshold for tactical videos
+                # MATCH RESEARCH CODE: ONLY spatial filtering, NO confidence threshold
+                # Research code: mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
+                # They do NOT filter by confidence - only by spatial validity
+                if x > 1 and y > 1:
                     # Map to pitch point
                     pitch_idx = self._get_yolo_keypoint_mapping(kp_idx)
                     if pitch_idx is not None and pitch_idx < len(self.all_pitch_points):

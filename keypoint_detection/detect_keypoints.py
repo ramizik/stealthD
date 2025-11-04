@@ -84,31 +84,46 @@ def detect_keypoints_in_frames(model: YOLO, frames) -> List:
 def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv.Detections, np.ndarray]:
     """Get keypoint detections and extract keypoint coordinates.
 
+    MATCHES RESEARCH CODE APPROACH:
+    - Extracts keypoints from YOLO pose detection result
+    - Returns shape (1, 32, 3) with [x, y, confidence]
+    - Filtering happens later using ONLY spatial mask (x>1, y>1)
+    - NO confidence-based filtering at detection stage
+
     Args:
         keypoint_model: Loaded YOLO pose model
         frame: Input frame as numpy array
 
     Returns:
-        Tuple of (detections, keypoints) where keypoints is array of shape (N, 27, 3)
-        for N detections with 27 keypoints each having (x, y, visibility)
+        Tuple of (detections, keypoints) where keypoints is array of shape (1, 32, 3)
+        for pitch detection with 32 keypoints each having (x, y, confidence)
     """
     results = detect_keypoints_in_frames(keypoint_model, frame)[0]
     detections = sv.Detections.from_ultralytics(results)
 
-    # Extract keypoints if available
+    # Extract keypoints - MATCH RESEARCH CODE PATTERN
+    # Research: result = pitch_detection_model(frame, verbose=False)[0]
+    #           keypoints = sv.KeyPoints.from_ultralytics(result)
+    # We use: results.keypoints.data for compatibility with older supervision
     keypoints = None
-    num_players = 0
-    avg_conf = 0.0
     if hasattr(results, 'keypoints') and results.keypoints is not None:
-        keypoints = results.keypoints.data.cpu().numpy()  # Shape: (N, 27, 3)
-        num_players = keypoints.shape[0]
-        if num_players > 0:
-            # Compute average confidence across all keypoints for all players
-            avg_conf = float(np.mean(keypoints[:, :, 2]))
+        # Get raw keypoint data (N_detections, N_keypoints, 3) where 3 = [x, y, conf]
+        keypoints_data = results.keypoints.data.cpu().numpy()
 
-    # Only log warnings for no detections (not every frame)
-    if num_players == 0:
-        print(f"[Keypoint Detection] WARNING: No keypoints detected in frame")
+        if keypoints_data.shape[0] > 0:
+            # Take only first detection (the pitch itself) - Shape: (1, 32, 3)
+            keypoints = keypoints_data[:1]
+
+            # Count valid keypoints using SPATIAL filter only (like research code)
+            # Research code: mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
+            spatial_mask = (keypoints[0, :, 0] > 1) & (keypoints[0, :, 1] > 1)
+            valid_count = np.sum(spatial_mask)
+
+            # Only warn if extremely few valid keypoints (< 4 needed for homography)
+            if valid_count < 4:
+                print(f"[Keypoint Detection] WARNING: Only {valid_count}/32 keypoints with x>1, y>1")
+        else:
+            print(f"[Keypoint Detection] WARNING: No pitch keypoints detected in frame")
 
     return detections, keypoints
 

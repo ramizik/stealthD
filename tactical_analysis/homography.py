@@ -79,7 +79,10 @@ class HomographyTransformer:
 
     def _filter_keypoints(self, detected_keypoints):
         """
-        Filter keypoints based on confidence threshold AND spatial validity.
+        Filter keypoints based on spatial validity ONLY (matches research code).
+
+        CRITICAL: Research code uses ONLY spatial filter, NO confidence threshold:
+        mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
 
         Args:
             detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
@@ -92,11 +95,11 @@ class HomographyTransformer:
 
         keypoints = detected_keypoints[0]  # Take first detection
 
-        # CRITICAL: Filter out invalid keypoints using BOTH confidence AND spatial checks
-        # Research code insight: keypoints with x<=1 or y<=1 are undetected/invalid
-        confidence_mask = keypoints[:, 2] > self.confidence_threshold
+        # MATCH RESEARCH CODE: Use ONLY spatial filtering (x > 1, y > 1)
+        # Research code does NOT filter by confidence - only by spatial validity
+        # Invalid/undetected keypoints have coordinates <= 1
         spatial_mask = (keypoints[:, 0] > 1) & (keypoints[:, 1] > 1)
-        filter_mask = confidence_mask & spatial_mask
+        filter_mask = spatial_mask
 
         valid_count = np.sum(filter_mask)
         if valid_count < 4:
