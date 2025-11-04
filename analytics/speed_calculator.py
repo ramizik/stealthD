@@ -261,6 +261,7 @@ class SpeedCalculator:
             for i, (frame_idx, bbox) in enumerate(player_frames):
                 # Get foot position (bottom center) for players - more accurate for speed calculation
                 foot_pos = self._get_foot_position(bbox)
+                foot_pos_array = np.array(foot_pos, dtype=np.float32)
 
                 # Get camera motion for this frame if available
                 camera_motion = None
@@ -269,7 +270,7 @@ class SpeedCalculator:
 
                 # Convert to field coordinates using adaptive per-frame transformation
                 field_coord, transform_method, confidence = adaptive_mapper.transform_point(
-                    frame_idx, foot_pos, camera_motion
+                    frame_idx, foot_pos_array, camera_motion
                 )
 
                 # Should never be None with adaptive transform, but check anyway
