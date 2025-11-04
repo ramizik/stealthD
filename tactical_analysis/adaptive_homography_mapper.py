@@ -252,28 +252,59 @@ class AdaptiveHomographyMapper:
                 # Calculate difference from previous frame (using median-filtered matrix)
                 max_diff_raw = np.abs(H_median - self.H_previous).max()
 
-                # SCENE CHANGE DETECTION with smart thresholds
+                # ADAPTIVE SMOOTHING: Graduated alpha based on change magnitude
                 is_scene_change = False
                 should_reject = False
 
-                if max_diff_raw > 200:
-                    # Large change detected - could be scene change OR bad detection
+                if max_diff_raw > 1000:
+                    # CATASTROPHIC change - likely bad detection
                     if num_keypoints >= 20:
-                        # Good keypoints + large change = likely real scene change
-                        # Use faster adaptation but still smooth
+                        # Even with good keypoints, use VERY aggressive smoothing
                         is_scene_change = True
-                        alpha = 0.5  # 50% new, 50% old for scene changes
+                        alpha = 0.05  # 5% new, 95% old - extreme smoothing
 
                         if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
-                            print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Scene change detected "
+                            print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 CATASTROPHIC change "
                                   f"(diff: {max_diff_raw:.1f}, {num_keypoints} keypoints) - using alpha={alpha}")
                     else:
-                        # Large change + few keypoints = BAD data, reject completely
+                        # Bad detection - reject
                         should_reject = True
 
                         if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
-                            print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED unstable matrix "
-                                  f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints) - keeping previous")
+                            print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED catastrophic "
+                                  f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints)")
+
+                elif max_diff_raw > 400:
+                    # VERY LARGE change - use very aggressive smoothing
+                    if num_keypoints >= 20:
+                        is_scene_change = True
+                        alpha = 0.1  # 10% new, 90% old
+
+                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                            print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Very large change "
+                                  f"(diff: {max_diff_raw:.1f}) - using alpha={alpha}")
+                    else:
+                        should_reject = True
+
+                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                            print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED large change "
+                                  f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints)")
+
+                elif max_diff_raw > 200:
+                    # LARGE change (like frame 528-529) - use aggressive smoothing
+                    if num_keypoints >= 20:
+                        is_scene_change = True
+                        alpha = 0.15  # 15% new, 85% old - THIS FIXES THE 10-14m JUMPS
+
+                        if frame_idx < 10 or (self.homography_success_count < 20 and is_scene_change):
+                            print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Large change "
+                                  f"(diff: {max_diff_raw:.1f}) - using alpha={alpha}")
+                    else:
+                        should_reject = True
+
+                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                            print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED medium change "
+                                  f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints)")
                 else:
                     # Normal frame - use slow, stable smoothing
                     alpha = 0.2  # 20% new, 80% old for normal frames
@@ -296,13 +327,19 @@ class AdaptiveHomographyMapper:
                 # Calculate difference AFTER smoothing
                 max_diff_smooth = np.abs(H_candidate - self.H_previous).max()
 
-                # FINAL SAFETY CHECK: Adaptive threshold based on context
-                if is_scene_change:
-                    # Scene changes can have larger smoothed diffs - be more permissive
-                    safety_threshold = 200  # Allow up to 200 for scene changes
+                # FINAL SAFETY CHECK: Adaptive threshold based on change magnitude
+                if max_diff_raw > 1000:
+                    # Catastrophic changes - very strict even after smoothing
+                    safety_threshold = 100  # With alpha=0.05, smoothed should be ~50
+                elif max_diff_raw > 400:
+                    # Very large changes - moderate threshold
+                    safety_threshold = 60   # With alpha=0.1, smoothed should be ~40
+                elif max_diff_raw > 200:
+                    # Large changes - lenient threshold
+                    safety_threshold = 40   # With alpha=0.15, smoothed should be ~30
                 else:
-                    # Normal frames should have small smoothed diffs
-                    safety_threshold = 50   # Strict for normal frames
+                    # Normal frames - strict threshold
+                    safety_threshold = 20   # With alpha=0.2, should be very small
 
                 if max_diff_smooth > safety_threshold:
                     # Even after median + EMA, change is too large - reject
