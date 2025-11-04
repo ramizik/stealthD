@@ -37,17 +37,19 @@ class AdaptiveHomographyMapper:
 
         Args:
             field_dimensions: (width, height) in meters (default: FIFA standard)
-            min_keypoints: Minimum keypoints required for homography
+            min_keypoints: Minimum keypoints required for homography (must be >= 4)
             temporal_window: Frames to search for temporal fallback
         """
         self.field_width = field_dimensions[0]
         self.field_height = field_dimensions[1]
-        self.min_keypoints = min_keypoints
+        self.min_keypoints = max(4, min_keypoints)  # Ensure at least 4 for homography
         self.temporal_window = temporal_window
 
-        # Initialize pitch configuration
+        # Initialize pitch configuration with 32 dense keypoints
         self.CONFIG = SoccerPitchConfiguration()
-        self.all_pitch_points = self._get_all_pitch_points()
+
+        # Get all 32 pitch reference points
+        self.all_pitch_points = np.array(self.CONFIG.vertices, dtype=np.float32)
 
         # Per-frame storage
         self.frame_homographies = {}  # {frame_idx: matrix}
@@ -59,16 +61,6 @@ class AdaptiveHomographyMapper:
         self.homography_success_count = 0
         self.temporal_fallback_count = 0
         self.proportional_fallback_count = 0
-
-    def _get_all_pitch_points(self) -> np.ndarray:
-        """Get all pitch reference points."""
-        all_pitch_points = np.array(self.CONFIG.vertices)
-        extra_pitch_points = np.array([
-            [2932, 3500],  # Left semicircle rightmost
-            [6000, 3500],  # Center point
-            [9069, 3500],  # Right semicircle rightmost
-        ])
-        return np.concatenate((all_pitch_points, extra_pitch_points))
 
     def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray],
                        field_line_keypoints: List[Tuple[float, float]],
@@ -121,11 +113,43 @@ class AdaptiveHomographyMapper:
                   f"({len(combined_keypoints)}/{self.min_keypoints})")
 
     def _get_yolo_keypoint_mapping(self, kp_idx: int) -> Optional[int]:
-        """Map YOLO keypoint index to pitch point index."""
-        # Same mapping as GlobalHomographyMapper
+        """
+        Map YOLO keypoint index (29 keypoints) to pitch point index (32 points).
+
+        The mapping ensures YOLO detected keypoints correspond to the correct
+        pitch reference points from our 32-point configuration.
+        """
+        # Mapping from 29 YOLO keypoints to 32 pitch points (0-indexed)
         mapping = np.array([
-            0, 1, 9, 4, 12, 2, 6, 3, 7, 5, 32, 13, 16, 14, 15, 33,
-            24, 25, 17, 28, 20, 26, 22, 27, 23, 29, 34, 30, 31
+            0,   # 0 -> Point 1 (top-left corner)
+            1,   # 1 -> Point 2 (left penalty area top)
+            2,   # 2 -> Point 3 (left goal area top)
+            3,   # 3 -> Point 4 (left goal area bottom)
+            4,   # 4 -> Point 5 (left penalty area bottom)
+            5,   # 5 -> Point 6 (bottom-left corner)
+            6,   # 6 -> Point 7 (left goal box top-right)
+            7,   # 7 -> Point 8 (left goal box bottom-right)
+            8,   # 8 -> Point 9 (left penalty spot)
+            9,   # 9 -> Point 10 (left penalty box top-right)
+            10,  # 10 -> Point 11
+            11,  # 11 -> Point 12
+            12,  # 12 -> Point 13 (left penalty box bottom-right)
+            13,  # 13 -> Point 14 (center line top)
+            14,  # 14 -> Point 15 (center circle top)
+            15,  # 15 -> Point 16 (center circle bottom)
+            16,  # 16 -> Point 17 (center line bottom)
+            17,  # 17 -> Point 18 (right penalty box top-left)
+            18,  # 18 -> Point 19
+            19,  # 19 -> Point 20
+            20,  # 20 -> Point 21 (right penalty box bottom-left)
+            21,  # 21 -> Point 22 (right penalty spot)
+            22,  # 22 -> Point 23 (right goal box top-left)
+            23,  # 23 -> Point 24 (right goal box bottom-left)
+            24,  # 24 -> Point 25 (top-right corner)
+            25,  # 25 -> Point 26 (right penalty area top)
+            26,  # 26 -> Point 27 (right goal area top)
+            27,  # 27 -> Point 28 (right goal area bottom)
+            28,  # 28 -> Point 29 (right penalty area bottom)
         ])
         if kp_idx < len(mapping):
             return int(mapping[kp_idx])

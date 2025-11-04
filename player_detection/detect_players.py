@@ -6,15 +6,15 @@ using YOLO models. Pipeline functions have been moved to detection_pipeline.py.
 
 import sys
 from pathlib import Path
-from typing import Tuple, Optional, List
+from typing import List, Optional, Tuple
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-from ultralytics import YOLO
 import numpy as np
 import supervision as sv
 import torch
+from ultralytics import YOLO
 
 # ================================================
 # Core Detection Functions
@@ -32,7 +32,7 @@ def load_detection_model(model_path: str) -> YOLO:
     Raises:
         RuntimeError: If GPU is required but not available
     """
-    from constants import REQUIRE_GPU, GPU_DEVICE
+    from constants import GPU_DEVICE, REQUIRE_GPU
 
     # Check GPU availability
     if REQUIRE_GPU and not torch.cuda.is_available():
@@ -60,8 +60,10 @@ def load_detection_model(model_path: str) -> YOLO:
         device = f'cuda:{GPU_DEVICE}'
         model.to(device)
         print(f"✓ Detection model loaded on GPU: {torch.cuda.get_device_name(GPU_DEVICE)}")
+        print(f"✓ InferenceSlicer enabled for improved ball detection (overlapping tiles)")
     else:
         print("⚠️ WARNING: Running on CPU - This will be VERY slow!")
+        print(f"✓ InferenceSlicer enabled for improved ball detection (overlapping tiles)")
 
     return model
 
@@ -78,25 +80,40 @@ def detect_objects_in_frames(model: YOLO, frames) -> List:
     """
     return model(frames, verbose=False)
 
-def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = False) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
+def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = True) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
     """Get separated detections for players, ball, and referees.
+
+    Uses InferenceSlicer for improved ball detection. Small objects like balls
+    can shrink to barely a few pixels after resizing, making them difficult to detect.
+    InferenceSlicer divides the image into overlapping patches, making the ball
+    proportionally larger within each patch for better detection accuracy.
 
     Args:
         detection_model: Loaded YOLO model
         frame: Input frame as numpy array
-        use_slicer: Whether to use inference slicer for large images
+        use_slicer: Whether to use inference slicer (default: True for better ball detection)
 
     Returns:
         Tuple of (player_detections, ball_detections, referee_detections)
     """
-    def inference_callback(frame: np.ndarray) -> sv.Detections:
+    def inference_callback(patch: np.ndarray) -> sv.Detections:
         """Convert YOLO results to supervision format."""
-        result = detect_objects_in_frames(detection_model, frame)[0]
+        result = detect_objects_in_frames(detection_model, patch)[0]
         return sv.Detections.from_ultralytics(result)
 
     # Get detections using slicer or direct inference
     if use_slicer:
-        slicer = sv.InferenceSlicer(callback=inference_callback)
+        h, w, _ = frame.shape
+
+        # Configure slicer with overlapping tiles for smooth tracking
+        # Overlap ensures ball detected at tile boundaries won't be missed
+        slicer = sv.InferenceSlicer(
+            callback=inference_callback,
+            slice_wh=(w // 2 + 100, h // 2 + 100),  # Tile size (slightly larger than half frame)
+            overlap_wh=(100, 100),  # 100px overlap between tiles
+            iou_threshold=0.1,  # Low threshold for ball (small object)
+            overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION  # Remove duplicate detections
+        )
         detections = slicer(frame)
     else:
         detections = inference_callback(frame)

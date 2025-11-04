@@ -37,6 +37,10 @@ class CompleteSoccerAnalysisPipeline:
         self.tracking_pipeline = TrackingPipeline(detection_model_path)
         self.processing_pipeline = ProcessingPipeline()
 
+        # Initialize ball tracker for anomaly filtering
+        from player_tracking import BallTracker
+        self.ball_tracker = BallTracker(buffer_size=10, max_distance=200)  # 200px max jump
+
     def initialize_models(self):
         """Initialize all models required for complete analysis."""
 
@@ -50,6 +54,7 @@ class CompleteSoccerAnalysisPipeline:
 
         init_time = time.time() - start_time
         print(f"All models initialized in {init_time:.2f}s")
+        print(f"✓ Ball tracker enabled (buffer=10, max_distance=200px for anomaly filtering)")
 
         # Print memory status after initialization
         self._print_memory_status("After Model Initialization")
@@ -544,6 +549,9 @@ class CompleteSoccerAnalysisPipeline:
             keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
+            # Filter ball detections using tracker (removes anomalies)
+            ball_detections = self.ball_tracker.update(ball_detections)
+
             # Accumulate keypoints for global homography (instead of per-frame transformer)
             global_mapper.add_frame_keypoints(i, keypoints)
 
@@ -624,6 +632,9 @@ class CompleteSoccerAnalysisPipeline:
             # Detect keypoints and objects with field line detection
             keypoints, metadata = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+
+            # Filter ball detections using tracker (removes anomalies)
+            ball_detections = self.ball_tracker.update(ball_detections)
 
             # Add frame data to adaptive mapper (YOLO keypoints + field line keypoints)
             adaptive_mapper.add_frame_data(

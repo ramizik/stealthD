@@ -179,3 +179,4 @@ output_videos/
 .cursor/
 .vscode/
 .github/
+constants.py
