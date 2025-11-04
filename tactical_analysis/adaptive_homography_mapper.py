@@ -2,6 +2,11 @@
 
 Builds per-frame homographies with intelligent fallbacks for tactical
 camera recordings with panning/zooming motion.
+
+STABILITY ENHANCEMENTS:
+- Temporal homography smoothing (EMA) to prevent matrix instability
+- Position validation with bounds checking
+- Per-player position smoothing to reduce jitter
 """
 
 import sys
@@ -10,7 +15,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -31,19 +36,29 @@ class AdaptiveHomographyMapper:
     """
 
     def __init__(self, field_dimensions: Tuple[float, float] = (105, 68),
-                 min_keypoints: int = 4, temporal_window: int = 15):
+                 min_keypoints: int = 4, temporal_window: int = 15,
+                 ema_alpha: float = 0.3, max_matrix_change: float = 50.0,
+                 position_smoothing_buffer: int = 3):
         """
-        Initialize adaptive homography mapper.
+        Initialize adaptive homography mapper with stability features.
 
         Args:
             field_dimensions: (width, height) in meters (default: FIFA standard)
             min_keypoints: Minimum keypoints required for homography (must be >= 4)
             temporal_window: Frames to search for temporal fallback
+            ema_alpha: EMA smoothing weight for new matrices (0.3 = 30% new, 70% previous)
+            max_matrix_change: Maximum allowed matrix element change (reject if exceeded)
+            position_smoothing_buffer: Number of positions to buffer per player for smoothing
         """
         self.field_width = field_dimensions[0]
         self.field_height = field_dimensions[1]
         self.min_keypoints = max(4, min_keypoints)  # Ensure at least 4 for homography
         self.temporal_window = temporal_window
+
+        # STABILITY PARAMETERS
+        self.ema_alpha = ema_alpha  # Lower = more smoothing (0.2-0.4 recommended)
+        self.max_matrix_change = max_matrix_change  # Reject extreme changes
+        self.position_smoothing_buffer = position_smoothing_buffer
 
         # Initialize pitch configuration with 32 dense keypoints
         self.CONFIG = SoccerPitchConfiguration()
@@ -56,11 +71,20 @@ class AdaptiveHomographyMapper:
         self.frame_keypoints = {}  # {frame_idx: [(pixel_x, pixel_y, pitch_x, pitch_y)]}
         self.frame_confidences = {}  # {frame_idx: confidence_score}
 
+        # TEMPORAL SMOOTHING STORAGE
+        self.H_previous = None  # Last stable homography matrix
+        self.H_smooth = None    # Current smoothed homography
+        self.H_buffer = deque(maxlen=5)  # Buffer of recent matrices for median filtering
+
+        # PER-PLAYER POSITION SMOOTHING
+        self.player_position_buffers = {}  # {player_id: deque of positions}
+
         # Statistics
         self.total_frames_processed = 0
         self.homography_success_count = 0
         self.temporal_fallback_count = 0
         self.proportional_fallback_count = 0
+        self.matrix_rejected_count = 0  # New: Count unstable matrices rejected
 
     def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray]):
         """
@@ -163,7 +187,12 @@ class AdaptiveHomographyMapper:
 
     def _build_frame_homography(self, frame_idx: int, keypoints: List[Tuple]) -> bool:
         """
-        Build homography matrix for a single frame.
+        Build homography matrix for a single frame WITH TEMPORAL SMOOTHING.
+
+        Implements stability improvements:
+        1. Matrix change validation (reject extreme changes)
+        2. Exponential moving average (EMA) smoothing
+        3. Fallback to previous stable matrix if new one is unstable
 
         Args:
             frame_idx: Frame index
@@ -190,31 +219,62 @@ class AdaptiveHomographyMapper:
             # MATCH RESEARCH CODE: Use DEFAULT cv2.findHomography (NO RANSAC)
             # Research: self.m, _ = cv2.findHomography(source, target)
             # They do NOT use RANSAC - just trust the spatially filtered keypoints
-            matrix, _ = cv2.findHomography(pixel_points, pitch_points)
+            H_new, _ = cv2.findHomography(pixel_points, pitch_points)
 
-            if matrix is None:
+            if H_new is None:
                 if frame_idx < 5:
                     print(f"[Adaptive Homography] Frame {frame_idx}: Homography calculation failed")
                 return False
 
-            # CHECK HOMOGRAPHY STABILITY: Compare with previous frame
-            # Large changes in homography matrix indicate instability
-            if frame_idx > 0 and (frame_idx - 1) in self.frame_homographies:
-                prev_matrix = self.frame_homographies[frame_idx - 1]
-                matrix_diff = np.abs(matrix - prev_matrix).max()
+            # STABILITY CHECK 1: Validate matrix change magnitude
+            if self.H_previous is not None:
+                matrix_diff = np.abs(H_new - self.H_previous).max()
 
-                # Warn about large changes (potential instability)
-                if matrix_diff > 0.5 and frame_idx < 10:  # Log first 10 unstable frames
-                    print(f"[Adaptive Homography] Frame {frame_idx}: WARNING - Large matrix change "
-                          f"(max_diff: {matrix_diff:.3f}) - may cause position jumps")
+                # Reject extreme changes that cause position jumps
+                if matrix_diff > self.max_matrix_change:
+                    self.matrix_rejected_count += 1
 
-            # SUCCESS - Store the homography matrix
+                    # Log first 10 rejections and occasional samples
+                    if self.matrix_rejected_count <= 10 or frame_idx % 100 == 0:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED unstable matrix "
+                              f"(max_diff: {matrix_diff:.1f} > threshold: {self.max_matrix_change}) "
+                              f"- using previous stable matrix")
+
+                    # Reuse previous stable matrix instead of this unstable one
+                    matrix = self.H_previous.copy()
+                    confidence = 0.8  # Slightly lower confidence for reused matrix
+                else:
+                    # STABILITY CHECK 2: Apply EMA temporal smoothing
+                    if self.H_smooth is None:
+                        # First frame - use as-is
+                        self.H_smooth = H_new
+                        matrix = H_new
+                    else:
+                        # Exponential Moving Average: H_smooth = alpha*H_new + (1-alpha)*H_smooth
+                        self.H_smooth = self.ema_alpha * H_new + (1 - self.ema_alpha) * self.H_smooth
+                        matrix = self.H_smooth
+
+                    # Add to buffer for optional median filtering
+                    self.H_buffer.append(H_new)
+
+                    confidence = 1.0  # Full confidence for smoothed matrix
+
+                    # Log first 5 successful smoothings
+                    if self.homography_success_count < 5:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Applied EMA smoothing "
+                              f"(diff: {matrix_diff:.1f}, alpha: {self.ema_alpha})")
+            else:
+                # First frame ever - no smoothing possible
+                matrix = H_new
+                self.H_smooth = H_new
+                confidence = 1.0
+
+            # Update previous matrix for next frame comparison
+            self.H_previous = matrix.copy()
+
+            # SUCCESS - Store the smoothed homography matrix
             self.frame_homographies[frame_idx] = matrix
-            self.frame_confidences[frame_idx] = 1.0  # Full confidence when using all points
-
-            # Log first 3 successful builds
-            if len(self.frame_homographies) <= 3:
-                print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built homography from {len(keypoints)} keypoints")
+            self.frame_confidences[frame_idx] = confidence
 
             return True
 
@@ -287,6 +347,63 @@ class AdaptiveHomographyMapper:
             return field_coord
         except:
             return None
+
+    def validate_position(self, position: np.ndarray, previous_position: Optional[np.ndarray] = None,
+                         dt: float = 0.04, max_speed_ms: float = 12.5) -> Tuple[bool, str]:
+        """
+        Validate transformed position for physical plausibility.
+
+        Args:
+            position: Current position [x, y] in meters
+            previous_position: Previous position [x, y] in meters (optional)
+            dt: Time delta between frames (default: 0.04s for 25fps)
+            max_speed_ms: Maximum allowed speed in m/s (default: 12.5 m/s = 45 km/h)
+
+        Returns:
+            Tuple of (is_valid, reason)
+        """
+        # Bounds check with 10m safety margin
+        if not (-10 <= position[0] <= self.field_width + 10 and
+                -10 <= position[1] <= self.field_height + 10):
+            return False, f"out_of_bounds ({position[0]:.1f}, {position[1]:.1f})"
+
+        # Distance check if we have previous position
+        if previous_position is not None:
+            distance = np.linalg.norm(position - previous_position)
+            max_distance = max_speed_ms * dt  # e.g., 12.5 m/s * 0.04s = 0.5m per frame
+
+            if distance > max_distance:
+                implied_speed_kmh = (distance / dt) * 3.6
+                return False, f"impossible_jump ({distance:.2f}m = {implied_speed_kmh:.0f} km/h)"
+
+        return True, "valid"
+
+    def smooth_player_position(self, player_id: int, position_raw: np.ndarray) -> np.ndarray:
+        """
+        Apply per-player position smoothing using median filter.
+
+        Similar to Roboflow's BallTracker but for all players.
+
+        Args:
+            player_id: Unique player/tracker ID
+            position_raw: Raw transformed position [x, y]
+
+        Returns:
+            Smoothed position [x, y]
+        """
+        if player_id not in self.player_position_buffers:
+            self.player_position_buffers[player_id] = deque(maxlen=self.position_smoothing_buffer)
+
+        # Add to buffer
+        self.player_position_buffers[player_id].append(position_raw)
+
+        # Return median of buffered positions
+        if len(self.player_position_buffers[player_id]) >= 2:
+            positions = np.array(self.player_position_buffers[player_id])
+            return np.median(positions, axis=0)
+        else:
+            # Not enough history - return raw
+            return position_raw
 
     def _temporal_interpolation(self, frame_idx: int, pixel_coord: np.ndarray) -> Tuple[Optional[np.ndarray], float]:
         """
@@ -369,7 +486,7 @@ class AdaptiveHomographyMapper:
         return field_coord
 
     def get_statistics(self) -> Dict:
-        """Get processing statistics."""
+        """Get processing statistics including stability metrics."""
         return {
             'total_frames_processed': self.total_frames_processed,
             'frames_with_homography': len(self.frame_homographies),
@@ -379,10 +496,16 @@ class AdaptiveHomographyMapper:
             ),
             'temporal_fallback_count': self.temporal_fallback_count,
             'proportional_fallback_count': self.proportional_fallback_count,
+            'matrix_rejected_count': self.matrix_rejected_count,  # NEW
+            'matrix_rejection_rate': (
+                self.matrix_rejected_count / self.total_frames_processed
+                if self.total_frames_processed > 0 else 0.0
+            ),  # NEW
+            'smoothing_active': self.H_smooth is not None,  # NEW
         }
 
     def print_statistics(self):
-        """Print processing statistics."""
+        """Print processing statistics including stability metrics."""
         stats = self.get_statistics()
         print(f"\n[Adaptive Homography] Statistics:")
         print(f"  Total frames processed: {stats['total_frames_processed']}")
@@ -390,3 +513,6 @@ class AdaptiveHomographyMapper:
         print(f"  Success rate: {100*stats['homography_success_rate']:.1f}%")
         print(f"  Temporal fallbacks: {stats['temporal_fallback_count']}")
         print(f"  Proportional fallbacks: {stats['proportional_fallback_count']}")
+        print(f"  Unstable matrices rejected: {stats['matrix_rejected_count']} "
+              f"({100*stats['matrix_rejection_rate']:.1f}%)")  # NEW
+        print(f"  EMA smoothing active: {stats['smoothing_active']}")  # NEW
