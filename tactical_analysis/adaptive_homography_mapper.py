@@ -78,6 +78,14 @@ class AdaptiveHomographyMapper:
         # Add YOLO keypoints if available
         if yolo_keypoints is not None and yolo_keypoints.shape[0] > 0:
             keypoints = yolo_keypoints[0]  # Take first detection
+
+            # DEBUG: Log raw keypoint data for first 3 frames
+            if frame_idx < 3:
+                total_kp = len(keypoints)
+                spatial_valid = np.sum((keypoints[:, 0] > 1) & (keypoints[:, 1] > 1))
+                print(f"[Adaptive Homography] Frame {frame_idx} DEBUG: "
+                      f"Total keypoints: {total_kp}, Spatial valid (x>1,y>1): {spatial_valid}")
+
             for kp_idx in range(len(keypoints)):
                 x, y, conf = keypoints[kp_idx]
                 # MATCH RESEARCH CODE: ONLY spatial filtering, NO confidence threshold
@@ -194,14 +202,25 @@ class AdaptiveHomographyMapper:
             inliers = np.sum(mask) if mask is not None else 0
             confidence = inliers / len(keypoints) if len(keypoints) > 0 else 0.0
 
-            # Store if confidence is reasonable (at least 30% inliers)
-            if confidence > 0.3:
+            # DEBUG: Log homography attempts for first 5 frames
+            if frame_idx < 5:
+                print(f"[Adaptive Homography] Frame {frame_idx}: Homography attempt - "
+                      f"keypoints: {len(keypoints)}, inliers: {inliers}, confidence: {confidence:.2f}")
+
+            # LOWER THRESHOLD: Research code doesn't specify, but with only 20% inliers we need to be less strict
+            # Adaptive mapper should be more permissive than global mapper
+            if confidence > 0.15:  # Accept if at least 15% inliers (was 0.3)
                 self.frame_homographies[frame_idx] = matrix
                 self.frame_confidences[frame_idx] = float(confidence)
+
+                # Log first 3 successful builds
+                if len(self.frame_homographies) <= 3:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ ACCEPTED "
+                          f"(confidence: {confidence:.2f}, inliers: {inliers}/{len(keypoints)})")
                 return True
             else:
-                # Log low confidence rejections (first 3 only)
-                if frame_idx < 3:
+                # Log rejections for first 5 frames
+                if frame_idx < 5:
                     print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Low confidence "
                           f"({confidence:.2f}, inliers: {inliers}/{len(keypoints)})")
                 return False
