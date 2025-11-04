@@ -7,18 +7,20 @@ to generate comprehensive match analytics.
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
-from typing import Dict, Tuple
-import supervision as sv
 import gc
+from typing import Dict, Tuple
 
-from .speed_calculator import SpeedCalculator
-from .possession_tracker import PossessionTracker
+import numpy as np
+import supervision as sv
+
 from .pass_detector import PassDetector
 from .player_ball_assigner import PlayerBallAssigner
+from .possession_tracker import PossessionTracker
+from .speed_calculator import SpeedCalculator
 
 
 class MetricsCalculator:
@@ -57,15 +59,16 @@ class MetricsCalculator:
             max_ball_distance=2.0  # Reduced from 2.5m for more accurate touch detection
         )
 
-    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, global_mapper,
-                                         video_dimensions: Tuple[int, int]) -> Dict:
+    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, adaptive_mapper,
+                                         video_dimensions: Tuple[int, int], camera_movement: list = None) -> Dict:
         """
-        Calculate field coordinates for ball positions using global homography.
+        Calculate field coordinates for ball positions using adaptive per-frame homography.
 
         Args:
             ball_tracks: Dictionary {frame_idx: [x1, y1, x2, y2]}
-            global_mapper: GlobalHomographyMapper object
+            adaptive_mapper: AdaptiveHomographyMapper object
             video_dimensions: (width, height) of video in pixels
+            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
             Dictionary {frame_idx: [x, y]} with ball field coordinates
@@ -79,28 +82,34 @@ class MetricsCalculator:
             # Get center of ball bounding box
             x_center = (bbox[0] + bbox[2]) / 2
             y_center = (bbox[1] + bbox[3]) / 2
-            ball_center = np.array([[x_center, y_center]])
+            ball_center = np.array([x_center, y_center])
 
-            # Convert to field coordinates using global homography
-            field_coord, _ = self.speed_calculator.calculate_field_coordinates(
-                ball_center, global_mapper, video_dimensions, frame_idx
+            # Get camera motion for this frame if available
+            camera_motion = None
+            if camera_movement and frame_idx < len(camera_movement):
+                camera_motion = tuple(camera_movement[frame_idx])
+
+            # Convert to field coordinates using adaptive transformation
+            field_coord, method, confidence = adaptive_mapper.transform_point(
+                frame_idx, ball_center, camera_motion
             )
 
-            # Skip if conversion failed or is low confidence
-            if field_coord is not None and len(field_coord) > 0:
-                ball_field_coords[int(frame_idx)] = [float(field_coord[0][0]), float(field_coord[0][1])]
+            # Skip if conversion failed (should be rare with adaptive fallbacks)
+            if field_coord is not None:
+                ball_field_coords[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
 
         return ball_field_coords
 
-    def calculate_all_metrics(self, all_tracks: Dict, global_mapper,
-                             video_info: sv.VideoInfo) -> Dict:
+    def calculate_all_metrics(self, all_tracks: Dict, adaptive_mapper,
+                             video_info: sv.VideoInfo, camera_movement: list = None) -> Dict:
         """
-        Calculate all analytics metrics from tracking data using global homography.
+        Calculate all analytics metrics from tracking data using adaptive homography.
 
         Args:
             all_tracks: Dictionary with keys 'player', 'ball', 'referee', 'player_classids'
-            global_mapper: GlobalHomographyMapper object
+            adaptive_mapper: AdaptiveHomographyMapper object
             video_info: Video information object from supervision
+            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
             Dictionary containing all calculated metrics:
@@ -115,7 +124,7 @@ class MetricsCalculator:
                 'player_analytics': {...}
             }
         """
-        print("Calculating analytics metrics with global homography...")
+        print("Calculating analytics metrics with adaptive homography...")
 
         # Extract data from all_tracks
         player_tracks = all_tracks.get('player', {})
@@ -129,7 +138,7 @@ class MetricsCalculator:
         print("  - Calculating player speeds and field coordinates...")
 
         player_speeds = self.speed_calculator.calculate_speeds(
-            player_tracks, global_mapper, video_dimensions
+            player_tracks, adaptive_mapper, video_dimensions, camera_movement
         )
 
         # Clear memory after speed calculation
@@ -138,7 +147,7 @@ class MetricsCalculator:
         # Step 2: Calculate ball field coordinates
         print("  - Calculating ball field coordinates...")
         ball_field_coords = self._calculate_ball_field_coordinates(
-            ball_tracks, global_mapper, video_dimensions
+            ball_tracks, adaptive_mapper, video_dimensions, camera_movement
         )
 
         # Clear memory after ball coordinate calculation

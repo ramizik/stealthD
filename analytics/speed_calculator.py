@@ -7,11 +7,13 @@ transformation fallback to linear scaling.
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
+from typing import Dict, Optional, Tuple
+
 import numpy as np
-from typing import Dict, Tuple, Optional
 
 
 class SpeedCalculator:
@@ -190,15 +192,16 @@ class SpeedCalculator:
         """Calculate Euclidean distance between two points in meters."""
         return float(np.linalg.norm(point1 - point2))
 
-    def calculate_speeds(self, player_tracks: Dict, global_mapper,
-                        video_dimensions: Tuple[int, int]) -> Dict:
+    def calculate_speeds(self, player_tracks: Dict, adaptive_mapper,
+                        video_dimensions: Tuple[int, int], camera_movement: list = None) -> Dict:
         """
-        Calculate speeds for all players across all frames using ROBUST transformation.
+        Calculate speeds for all players across all frames using adaptive per-frame transformation.
 
         Args:
             player_tracks: Dictionary {frame_idx: {player_id: [x1, y1, x2, y2]}}
-            global_mapper: GlobalHomographyMapper object with transform_points_robust()
+            adaptive_mapper: AdaptiveHomographyMapper object with per-frame homographies
             video_dimensions: (width, height) of video in pixels
+            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
             Dictionary with structure:
@@ -214,18 +217,18 @@ class SpeedCalculator:
         """
         player_speeds = {}
 
-        print(f"\n[SPEED DEBUG] Starting speed calculation with ROBUST multi-tier transformation:")
+        print(f"\n[SPEED DEBUG] Starting speed calculation with ADAPTIVE per-frame transformation:")
         print(f"   Video dimensions: {video_dimensions}")
         print(f"   Field dimensions: {self.field_width}m x {self.field_height}m")
         print(f"   FPS: {self.fps}")
 
-        # Get global mapper statistics
-        if hasattr(global_mapper, 'get_statistics'):
-            mapper_stats = global_mapper.get_statistics()
-            print(f"   Global mapper statistics:")
-            print(f"     - Keypoints accumulated: {mapper_stats.get('total_keypoints_accumulated', 0)}")
-            print(f"     - Unique keypoints: {mapper_stats.get('unique_keypoints_detected', 0)}")
-            print(f"     - High-confidence coverage: {mapper_stats.get('high_confidence_coverage_percent', 0):.1f}%")
+        # Get adaptive mapper statistics
+        if hasattr(adaptive_mapper, 'get_statistics'):
+            mapper_stats = adaptive_mapper.get_statistics()
+            print(f"   Adaptive mapper statistics:")
+            print(f"     - Frames with homography: {mapper_stats.get('frames_with_homography', 0)}")
+            print(f"     - Temporal interpolation rate: {mapper_stats.get('temporal_interpolation_rate', 0):.1f}%")
+            print(f"     - Proportional fallback rate: {mapper_stats.get('proportional_fallback_rate', 0):.1f}%")
 
         # Get all unique player IDs
         all_player_ids = set()
@@ -257,21 +260,23 @@ class SpeedCalculator:
 
             for i, (frame_idx, bbox) in enumerate(player_frames):
                 # Get foot position (bottom center) for players - more accurate for speed calculation
-                foot_pos = np.array([self._get_foot_position(bbox)])
+                foot_pos = self._get_foot_position(bbox)
 
-                # Convert to field coordinates using ROBUST multi-tier transformation
-                # ALWAYS returns coordinates - never None
-                field_coord, transform_method = self.calculate_field_coordinates(
-                    foot_pos, global_mapper, video_dimensions,
-                    frame_idx=frame_idx, player_id=player_id
+                # Get camera motion for this frame if available
+                camera_motion = None
+                if camera_movement and frame_idx < len(camera_movement):
+                    camera_motion = tuple(camera_movement[frame_idx])
+
+                # Convert to field coordinates using adaptive per-frame transformation
+                field_coord, transform_method, confidence = adaptive_mapper.transform_point(
+                    frame_idx, foot_pos, camera_motion
                 )
 
-                # Should never be None with robust transform, but check anyway
-                if field_coord is None or len(field_coord) == 0:
+                # Should never be None with adaptive transform, but check anyway
+                if field_coord is None:
                     print(f"[WARNING] Unexpected None coordinate for player {player_id} frame {frame_idx}")
                     continue
 
-                field_coord = field_coord[0]  # Get single point
                 field_coordinates[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
 
                 # Calculate speed if we have a previous position
@@ -343,9 +348,9 @@ class SpeedCalculator:
                     '_debug_max_speed_sample': max_speed_sample  # Store for debug
                 }
 
-        # Print debug statistics from GlobalHomographyMapper
-        if hasattr(global_mapper, 'print_debug_stats'):
-            global_mapper.print_debug_stats()
+        # Print debug statistics from AdaptiveHomographyMapper
+        if hasattr(adaptive_mapper, 'print_debug_stats'):
+            adaptive_mapper.print_debug_stats()
 
         # Find top 5 fastest players
         if player_speeds:
@@ -367,5 +372,6 @@ class SpeedCalculator:
                     print(f"      Position: ({max_sample['from_pos'][0]:.2f}, {max_sample['from_pos'][1]:.2f}) -> "
                           f"({max_sample['to_pos'][0]:.2f}, {max_sample['to_pos'][1]:.2f}) meters")
                     print(f"      Transform method: {max_sample['transform_method']}")
+
 
         return player_speeds

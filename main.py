@@ -1,21 +1,25 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
-from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline
-from constants import model_path, test_video, REQUIRE_GPU, GPU_DEVICE
-from keypoint_detection.keypoint_constants import keypoint_model_path
-import numpy as np
-import time
-from tqdm import tqdm
-import supervision as sv
-import json
-import pickle
-import os
-import torch
 import gc
+import json
+import os
+import pickle
+import time
+
 import cv2
+import numpy as np
+import supervision as sv
+import torch
+from tqdm import tqdm
+
+from constants import GPU_DEVICE, REQUIRE_GPU, model_path, test_video
+from keypoint_detection.keypoint_constants import keypoint_model_path
+from pipelines import (DetectionPipeline, KeypointPipeline, ProcessingPipeline,
+                       TrackingPipeline)
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -105,28 +109,28 @@ class CompleteSoccerAnalysisPipeline:
                 with open(cache_path, 'rb') as f:
                     cached_data = pickle.load(f)
 
-                # Check cache version (version 2 uses global mapper)
+                # Check cache version (version 3 uses adaptive mapper)
                 cache_version = cached_data.get('cache_version', 1)
 
                 # Validate cache matches current video and is correct version
                 if (cached_data.get('num_frames') == total_frames and
                     cached_data.get('frame_count') == frame_count and
-                    cache_version == 2):  # Must be version 2 (global mapper)
+                    cache_version == 3):  # Must be version 3 (adaptive mapper)
                     all_tracks = cached_data['all_tracks']
-                    global_mapper = cached_data['global_mapper']
+                    adaptive_mapper = cached_data['adaptive_mapper']
                     print(f"  ✓ Cache loaded successfully - skipping frame processing")
                 else:
-                    if cache_version == 1:
-                        print(f"  Old cache format detected (per-frame transformers) - reprocessing with global mapper...")
+                    if cache_version < 3:
+                        print(f"  Old cache format detected (version {cache_version}) - reprocessing with adaptive mapper...")
                     else:
                         print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {total_frames}, "
                               f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
-                    all_tracks, global_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+                    all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
             except Exception as e:
                 print(f"  Error loading cache: {e} - reprocessing...")
-                all_tracks, global_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+                all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
         else:
-            all_tracks, global_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+            all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
 
         # Clear memory after frame processing
         self._clear_memory()
@@ -226,7 +230,7 @@ class CompleteSoccerAnalysisPipeline:
         print(f"    Team 1: {team_summary.get('team_1_count', 0)} players")
 
         # Step 5.5: Calculate analytics metrics (BEFORE camera compensation)
-        # Use original pixel positions with global homography mapper
+        # Use original pixel positions with adaptive homography mapper
         print("\n[Step 5.5/8] Calculating player speeds, possession, and passes...")
         from analytics import MetricsCalculator
 
@@ -234,18 +238,17 @@ class CompleteSoccerAnalysisPipeline:
         metrics_calculator = MetricsCalculator(fps=video_info.fps)
 
         # Calculate speeds using original tracks (not camera-compensated)
-        # Global homography provides consistent transformation across all frames
+        # Adaptive homography provides per-frame transformation
         metrics_data = metrics_calculator.calculate_all_metrics(
             all_tracks,
-            global_mapper,  # Changed from view_transformers
-            video_info
+            adaptive_mapper,
+            video_info,
+            camera_movement  # Pass camera movement for transformation
         )
 
-        # Step 5.55: Print confidence coverage report
-        print("\n[Step 5.55/8] Global homography confidence report...")
-        from tactical_analysis.confidence_visualizer import ConfidenceVisualizer
-        visualizer = ConfidenceVisualizer()
-        visualizer.print_coverage_report(global_mapper)
+        # Step 5.55: Print adaptive homography statistics
+        print("\n[Step 5.55/8] Adaptive homography statistics...")
+        adaptive_mapper.print_statistics()
 
         # Step 5.6: Now apply camera compensation for track stitching and visualization
         print("\n[Step 5.6/8] Applying camera movement compensation for visualization...")
@@ -271,6 +274,7 @@ class CompleteSoccerAnalysisPipeline:
         annotation_tracks = copy.deepcopy(all_tracks)
         if camera_movement is not None:
             from camera_analysis import CameraMovementEstimator
+
             # Recreate estimator for restoration (lightweight operation)
             cap = cv2.VideoCapture(str(video_path))
             ret, first_frame = cap.read()
@@ -524,7 +528,8 @@ class CompleteSoccerAnalysisPipeline:
         all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
 
         # Initialize global homography mapper
-        from tactical_analysis.global_homography_mapper import GlobalHomographyMapper
+        from tactical_analysis.global_homography_mapper import \
+            GlobalHomographyMapper
         global_mapper = GlobalHomographyMapper()
 
         print(f"  [Global Homography] Accumulating keypoints from {len(frames)} frames...")
@@ -592,15 +597,16 @@ class CompleteSoccerAnalysisPipeline:
             frame_count: Frame count limit (-1 for all)
 
         Returns:
-            Tuple of (all_tracks, global_mapper)
+            Tuple of (all_tracks, adaptive_mapper)
         """
         all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
 
-        # Initialize global homography mapper
-        from tactical_analysis.global_homography_mapper import GlobalHomographyMapper
-        global_mapper = GlobalHomographyMapper()
+        # Initialize adaptive homography mapper for moving camera
+        from tactical_analysis.adaptive_homography_mapper import \
+            AdaptiveHomographyMapper
+        adaptive_mapper = AdaptiveHomographyMapper()
 
-        print(f"  [Global Homography] Processing {total_frames} frames with streaming (memory-efficient)...")
+        print(f"  [Adaptive Homography] Processing {total_frames} frames with per-frame homography...")
 
         # Use supervision's frame generator (does NOT load all frames into memory)
         frame_generator = sv.get_video_frames_generator(
@@ -615,12 +621,17 @@ class CompleteSoccerAnalysisPipeline:
                                        mininterval=2.0, miniters=update_interval,
                                        ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
 
-            # Detect keypoints and objects
-            keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
+            # Detect keypoints and objects with field line detection
+            keypoints, metadata = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
-            # Accumulate keypoints for global homography
-            global_mapper.add_frame_keypoints(i, keypoints)
+            # Add frame data to adaptive mapper (YOLO keypoints + field line keypoints)
+            adaptive_mapper.add_frame_data(
+                i,
+                keypoints,
+                metadata.get('field_line_keypoints', []),
+                metadata.get('field_line_confidence', 0.0)
+            )
 
             # Update with tracking
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
@@ -639,22 +650,19 @@ class CompleteSoccerAnalysisPipeline:
                     torch.cuda.empty_cache()
                 gc.collect()
 
-        # Build global homography from all accumulated keypoints
-        print(f"\n  [Step 4.5/8] Building global homography from accumulated keypoints...")
-        homography_success = global_mapper.build_global_homography()
+        # Print statistics
+        print(f"\n  [Step 4.5/8] Adaptive homography processing complete")
+        adaptive_mapper.print_statistics()
 
-        if not homography_success:
-            print(f"  [WARNING] Failed to build global homography. Analytics may be inaccurate.")
-
-        # Save cache
+        # Save cache (version 3 uses adaptive mapper)
         print(f"\n  Saving frame processing cache to: {cache_path.name}")
         try:
             cached_data = {
                 'all_tracks': all_tracks,
-                'global_mapper': global_mapper,
+                'adaptive_mapper': adaptive_mapper,
                 'num_frames': total_frames,
                 'frame_count': frame_count,
-                'cache_version': 2  # Version 2 uses global mapper
+                'cache_version': 3  # Version 3 uses adaptive mapper
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cached_data, f)
@@ -662,7 +670,7 @@ class CompleteSoccerAnalysisPipeline:
         except Exception as e:
             print(f"  Warning: Failed to save cache: {e}")
 
-        return all_tracks, global_mapper
+        return all_tracks, adaptive_mapper
 
     def _calculate_statistics(self, all_tracks, num_frames):
         """
