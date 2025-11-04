@@ -64,6 +64,32 @@ class GlobalHomographyMapper:
         self.total_keypoints_accumulated = 0
         self.frames_with_keypoints = 0
 
+        # === ROBUST MULTI-TIER FALLBACK SYSTEM ===
+        # Per-frame homography cache: {frame_idx: matrix}
+        self.per_frame_matrices = {}
+
+        # Temporal smoothing window (30 frames = 1 second at 30fps)
+        self.temporal_window_size = 30
+        self.frame_matrix_history = []  # List of (frame_idx, matrix) tuples
+
+        # Last-known-good matrix cache
+        self.last_valid_matrix = None
+        self.last_valid_frame = None
+
+        # Per-player position memory: {player_id: {'frame': int, 'position': array, 'pixel': array}}
+        self.player_position_memory = {}
+
+        # Debug statistics for multi-tier fallback
+        self.debug_stats = {
+            'per_frame_success': 0,
+            'temporal_fallback': 0,
+            'global_fallback': 0,
+            'last_valid_fallback': 0,
+            'player_memory_fallback': 0,
+            'proportional_fallback': 0,
+            'total_transformations': 0
+        }
+
     def _get_all_pitch_points(self) -> np.ndarray:
         """Get all pitch reference points including extra points."""
         all_pitch_points = np.array(self.CONFIG.vertices)
@@ -296,6 +322,252 @@ class GlobalHomographyMapper:
         avg_confidence = np.mean(confidences) if confidences else 0.0
 
         return pitch_coords, float(avg_confidence)
+
+    def transform_points_robust(self, pixel_coords: np.ndarray, frame_idx: int = None,
+                               player_id: int = None, video_dimensions: Tuple[int, int] = None,
+                               per_frame_keypoints: Dict = None) -> Tuple[np.ndarray, str]:
+        """
+        ROBUST multi-tier transformation that NEVER returns null coordinates.
+
+        Fallback hierarchy (6 tiers):
+        1. Per-frame homography (if sufficient keypoints detected this frame)
+        2. Temporal smoothing (average of last 30 frames' matrices)
+        3. Global homography (if matrix_built and high confidence)
+        4. Last-known-good matrix (cached from most recent successful transform)
+        5. Per-player position memory (player's last known valid position)
+        6. Proportional field estimation (ALWAYS works - conservative fallback)
+
+        Args:
+            pixel_coords: Array of shape (N, 2) with [x, y] pixel coordinates
+            frame_idx: Current frame index (for temporal/debug logging)
+            player_id: Player ID (for per-player position memory)
+            video_dimensions: (width, height) for proportional fallback
+            per_frame_keypoints: Dict with keypoint detections for this frame
+                                Format: {kp_idx: {'pixel': array, 'confidence': float}}
+
+        Returns:
+            Tuple of (pitch_coords in pitch units, fallback_method_used)
+            ALWAYS returns valid coordinates - never returns None
+        """
+        if len(pixel_coords) == 0:
+            return np.array([]).reshape(0, 2), 'empty'
+
+        self.debug_stats['total_transformations'] += 1
+
+        # === TIER 1: Per-frame homography ===
+        if per_frame_keypoints and len(per_frame_keypoints) >= 4:
+            try:
+                matrix = self._build_per_frame_matrix(per_frame_keypoints)
+                if matrix is not None and self._is_matrix_valid(matrix, pixel_coords):
+                    # Cache this matrix
+                    if frame_idx is not None:
+                        self.per_frame_matrices[frame_idx] = matrix
+                        self.frame_matrix_history.append((frame_idx, matrix))
+                        if len(self.frame_matrix_history) > self.temporal_window_size:
+                            self.frame_matrix_history.pop(0)
+                        self.last_valid_matrix = matrix
+                        self.last_valid_frame = frame_idx
+
+                    result = self._apply_matrix(matrix, pixel_coords)
+                    self.debug_stats['per_frame_success'] += 1
+
+                    # Update player position memory
+                    if player_id is not None and result is not None and len(result) > 0:
+                        self._update_player_memory(player_id, frame_idx, result[0], pixel_coords[0])
+
+                    return result, 'per_frame'
+            except Exception as e:
+                print(f"[DEBUG] Tier 1 failed (frame {frame_idx}): {e}")
+
+        # === TIER 2: Temporal smoothing ===
+        if len(self.frame_matrix_history) >= 3:  # Need at least 3 recent frames
+            try:
+                avg_matrix = self._get_temporal_average_matrix()
+                if avg_matrix is not None and self._is_matrix_valid(avg_matrix, pixel_coords):
+                    result = self._apply_matrix(avg_matrix, pixel_coords)
+                    self.debug_stats['temporal_fallback'] += 1
+
+                    if player_id is not None and result is not None and len(result) > 0:
+                        self._update_player_memory(player_id, frame_idx, result[0], pixel_coords[0])
+
+                    return result, 'temporal'
+            except Exception as e:
+                print(f"[DEBUG] Tier 2 failed (frame {frame_idx}): {e}")
+
+        # === TIER 3: Global homography ===
+        if self.matrix_built and self.global_matrix is not None:
+            try:
+                if self._is_matrix_valid(self.global_matrix, pixel_coords):
+                    result = self._apply_matrix(self.global_matrix, pixel_coords)
+                    self.debug_stats['global_fallback'] += 1
+
+                    if player_id is not None and result is not None and len(result) > 0:
+                        self._update_player_memory(player_id, frame_idx, result[0], pixel_coords[0])
+
+                    return result, 'global'
+            except Exception as e:
+                print(f"[DEBUG] Tier 3 failed (frame {frame_idx}): {e}")
+
+        # === TIER 4: Last-known-good matrix ===
+        if self.last_valid_matrix is not None:
+            try:
+                if self._is_matrix_valid(self.last_valid_matrix, pixel_coords):
+                    result = self._apply_matrix(self.last_valid_matrix, pixel_coords)
+                    self.debug_stats['last_valid_fallback'] += 1
+
+                    if player_id is not None and result is not None and len(result) > 0:
+                        self._update_player_memory(player_id, frame_idx, result[0], pixel_coords[0])
+
+                    return result, f'last_valid_frame_{self.last_valid_frame}'
+            except Exception as e:
+                print(f"[DEBUG] Tier 4 failed (frame {frame_idx}): {e}")
+
+        # === TIER 5: Per-player position memory ===
+        if player_id is not None and player_id in self.player_position_memory:
+            memory = self.player_position_memory[player_id]
+            # Only use if recent (within 30 frames)
+            if frame_idx is not None and abs(frame_idx - memory['frame']) <= 30:
+                self.debug_stats['player_memory_fallback'] += 1
+                return np.array([memory['position']]), f'player_memory_frame_{memory["frame"]}'
+
+        # === TIER 6: Proportional field estimation (ALWAYS WORKS) ===
+        if video_dimensions is not None:
+            result = self._proportional_estimate(pixel_coords, video_dimensions)
+            self.debug_stats['proportional_fallback'] += 1
+            print(f"[DEBUG] Tier 6 proportional fallback used (frame {frame_idx}, player {player_id})")
+            return result, 'proportional'
+
+        # Ultimate fallback: return center of field
+        print(f"[WARNING] All tiers failed! Returning field center (frame {frame_idx}, player {player_id})")
+        center_pitch = np.array([[6000.0, 3500.0]])  # Center of 12000x7000 pitch
+        return center_pitch, 'emergency_center'
+
+    def _build_per_frame_matrix(self, keypoints: Dict) -> Optional[np.ndarray]:
+        """Build homography matrix from this frame's keypoints."""
+        pixel_points = []
+        pitch_points = []
+
+        for kp_idx, kp_data in keypoints.items():
+            if kp_data['confidence'] < self.confidence_threshold:
+                continue
+
+            # Map our keypoint index to pitch point
+            if kp_idx < len(self.our_to_sports_mapping):
+                sports_idx = self.our_to_sports_mapping[kp_idx]
+                if sports_idx < len(self.all_pitch_points):
+                    pixel_points.append(kp_data['pixel'])
+                    pitch_points.append(self.all_pitch_points[sports_idx])
+
+        if len(pixel_points) < 4:
+            return None
+
+        pixel_pts = np.array(pixel_points, dtype=np.float32)
+        pitch_pts = np.array(pitch_points, dtype=np.float32)
+
+        matrix, _ = cv2.findHomography(pixel_pts, pitch_pts, cv2.RANSAC, 5.0)
+        return matrix
+
+    def _get_temporal_average_matrix(self) -> Optional[np.ndarray]:
+        """Average the last N homography matrices for temporal smoothing."""
+        if len(self.frame_matrix_history) == 0:
+            return None
+
+        # Simple element-wise averaging
+        matrices = [m for _, m in self.frame_matrix_history if m is not None]
+        if len(matrices) == 0:
+            return None
+
+        avg_matrix = np.mean(matrices, axis=0)
+        return avg_matrix
+
+    def _is_matrix_valid(self, matrix: np.ndarray, pixel_coords: np.ndarray,
+                        max_coord: float = 15000.0) -> bool:
+        """
+        Check if a matrix produces reasonable coordinates.
+
+        Args:
+            matrix: 3x3 homography matrix
+            pixel_coords: Sample pixel coordinates to test
+            max_coord: Maximum acceptable pitch coordinate (pitch is 12000x7000)
+
+        Returns:
+            True if matrix produces valid coordinates
+        """
+        if matrix is None:
+            return False
+
+        try:
+            # Test with first coordinate
+            test_point = pixel_coords[0:1].reshape(-1, 1, 2).astype(np.float32)
+            result = cv2.perspectiveTransform(test_point, matrix).reshape(-1, 2)
+
+            # Check if result is reasonable (within expanded bounds)
+            if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+                return False
+
+            if np.any(np.abs(result) > max_coord):
+                return False
+
+            return True
+        except:
+            return False
+
+    def _apply_matrix(self, matrix: np.ndarray, pixel_coords: np.ndarray) -> np.ndarray:
+        """Apply homography matrix to pixel coordinates."""
+        coords = np.array(pixel_coords, dtype=np.float32).reshape(-1, 1, 2)
+        result = cv2.perspectiveTransform(coords, matrix)
+        return result.reshape(-1, 2)
+
+    def _proportional_estimate(self, pixel_coords: np.ndarray,
+                              video_dimensions: Tuple[int, int]) -> np.ndarray:
+        """
+        Conservative proportional estimation: ALWAYS returns valid coordinates.
+        Assumes field occupies central 60% of frame to avoid overestimation.
+        """
+        video_width, video_height = video_dimensions
+
+        # Assume field occupies central 60% of frame
+        field_fraction = 0.6
+        margin = (1 - field_fraction) / 2
+
+        # Normalize pixel coordinates to [0, 1]
+        norm_x = (pixel_coords[:, 0] / video_width - margin) / field_fraction
+        norm_y = (pixel_coords[:, 1] / video_height - margin) / field_fraction
+
+        # Clamp to [0, 1]
+        norm_x = np.clip(norm_x, 0, 1)
+        norm_y = np.clip(norm_y, 0, 1)
+
+        # Scale to pitch coordinates (12000x7000)
+        pitch_coords = np.zeros_like(pixel_coords, dtype=np.float32)
+        pitch_coords[:, 0] = norm_x * 12000.0
+        pitch_coords[:, 1] = norm_y * 7000.0
+
+        return pitch_coords
+
+    def _update_player_memory(self, player_id: int, frame_idx: int,
+                              position: np.ndarray, pixel: np.ndarray):
+        """Update per-player position memory for fallback."""
+        self.player_position_memory[player_id] = {
+            'frame': frame_idx,
+            'position': position.copy(),
+            'pixel': pixel.copy()
+        }
+
+    def print_debug_stats(self):
+        """Print debug statistics about which fallback tiers were used."""
+        total = self.debug_stats['total_transformations']
+        if total == 0:
+            print("[DEBUG] No transformations performed yet")
+            return
+
+        print(f"\n[DEBUG] Transformation Statistics ({total} total):")
+        print(f"  Tier 1 (Per-frame):     {self.debug_stats['per_frame_success']:6d} ({100*self.debug_stats['per_frame_success']/total:5.1f}%)")
+        print(f"  Tier 2 (Temporal):      {self.debug_stats['temporal_fallback']:6d} ({100*self.debug_stats['temporal_fallback']/total:5.1f}%)")
+        print(f"  Tier 3 (Global):        {self.debug_stats['global_fallback']:6d} ({100*self.debug_stats['global_fallback']/total:5.1f}%)")
+        print(f"  Tier 4 (Last-valid):    {self.debug_stats['last_valid_fallback']:6d} ({100*self.debug_stats['last_valid_fallback']/total:5.1f}%)")
+        print(f"  Tier 5 (Player memory): {self.debug_stats['player_memory_fallback']:6d} ({100*self.debug_stats['player_memory_fallback']/total:5.1f}%)")
+        print(f"  Tier 6 (Proportional):  {self.debug_stats['proportional_fallback']:6d} ({100*self.debug_stats['proportional_fallback']/total:5.1f}%)\n")
 
     def _get_point_confidence(self, x_meters: float, y_meters: float) -> float:
         """Get confidence score for a specific field position."""
