@@ -105,10 +105,10 @@ def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv
         if num_players > 0:
             # Compute average confidence across all keypoints for all players
             avg_conf = float(np.mean(keypoints[:, :, 2]))
-    # Logging for diagnostics
-    print(f"[Keypoint Detection] Frame: Detected {num_players} players, avg keypoint confidence: {avg_conf:.3f}")
+
+    # Only log warnings for no detections (not every frame)
     if num_players == 0:
-        print(f"[Keypoint Detection] WARNING: No players detected in this frame.")
+        print(f"[Keypoint Detection] WARNING: No keypoints detected in frame")
 
     return detections, keypoints
 

@@ -278,6 +278,14 @@ class SpeedCalculator:
                     print(f"[WARNING] Unexpected None coordinate for player {player_id} frame {frame_idx}")
                     continue
 
+                # DEBUG: Log out-of-bounds coordinates
+                if (field_coord[0] < 0 or field_coord[0] > self.field_width or
+                    field_coord[1] < 0 or field_coord[1] > self.field_height):
+                    print(f"[COORD DEBUG] Player {player_id} Frame {frame_idx}: "
+                          f"OUT OF BOUNDS ({field_coord[0]:.2f}, {field_coord[1]:.2f})m "
+                          f"from pixel ({foot_pos[0]:.1f}, {foot_pos[1]:.1f}) "
+                          f"via {transform_method} (conf: {confidence:.2f})")
+
                 field_coordinates[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
 
                 # Calculate speed if we have a previous position

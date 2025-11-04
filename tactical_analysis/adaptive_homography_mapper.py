@@ -97,11 +97,12 @@ class AdaptiveHomographyMapper:
             success = self._build_frame_homography(frame_idx, combined_keypoints)
             if success:
                 self.homography_success_count += 1
-                print(f"[Adaptive Homography] Frame {frame_idx}: Built homography from "
-                      f"{len(combined_keypoints)} keypoints")
+                # No logging for successful homography builds - too verbose
         else:
-            print(f"[Adaptive Homography] Frame {frame_idx}: Insufficient keypoints "
-                  f"({len(combined_keypoints)}/{self.min_keypoints})")
+            # Only log first 5 failures to avoid spam
+            if self.total_frames_processed <= 5:
+                print(f"[Adaptive Homography] Frame {frame_idx}: Insufficient keypoints "
+                      f"({len(combined_keypoints)}/{self.min_keypoints})")
 
     def _get_yolo_keypoint_mapping(self, kp_idx: int) -> Optional[int]:
         """
@@ -190,6 +191,26 @@ class AdaptiveHomographyMapper:
             inliers = np.sum(mask) if mask is not None else 0
             confidence = inliers / len(keypoints) if len(keypoints) > 0 else 0.0
 
+            # DEBUG: Test transformation quality by checking a known point
+            # Transform center of image and verify it's within field bounds
+            test_point = np.array([[[960.0, 540.0]]], dtype=np.float32)  # Center of 1920x1080
+            try:
+                test_result = cv2.perspectiveTransform(test_point, matrix)
+                test_x, test_y = test_result[0][0]
+
+                # Convert from pitch units (12000x7000) to meters (105x68)
+                test_x_m = test_x * (105.0 / 12000.0)
+                test_y_m = test_y * (68.0 / 7000.0)
+
+                # Check if result is wildly out of bounds (sanity check)
+                if test_x_m < -50 or test_x_m > 155 or test_y_m < -50 or test_y_m > 118:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Bad transformation "
+                          f"(center -> ({test_x_m:.1f}, {test_y_m:.1f})m, inliers: {inliers}/{len(keypoints)})")
+                    return False
+            except:
+                print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Transform test failed")
+                return False
+
             # Store if confidence is reasonable
             if confidence > 0.3:
                 self.frame_homographies[frame_idx] = matrix
@@ -246,7 +267,7 @@ class AdaptiveHomographyMapper:
         return field_coord, 'proportional', 0.3
 
     def _apply_homography(self, pixel_coord: np.ndarray, matrix: np.ndarray) -> Optional[np.ndarray]:
-        """Apply homography transformation to a point."""
+        """Apply homography transformation to a point with validation."""
         try:
             point = np.array([[pixel_coord]], dtype=np.float32)
             transformed = cv2.perspectiveTransform(point, matrix)
@@ -255,6 +276,13 @@ class AdaptiveHomographyMapper:
             # Convert from pitch units to meters
             field_coord[0] = field_coord[0] * (self.field_width / 12000.0)
             field_coord[1] = field_coord[1] * (self.field_height / 7000.0)
+
+            # CRITICAL VALIDATION: Reject results that are wildly out of bounds
+            # Allow some margin (50m) for edge detection, but reject extreme outliers
+            if (field_coord[0] < -50 or field_coord[0] > 155 or
+                field_coord[1] < -50 or field_coord[1] > 118):
+                # This transformation is corrupted - return None to trigger fallback
+                return None
 
             return field_coord
         except:
