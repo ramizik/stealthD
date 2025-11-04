@@ -296,14 +296,22 @@ class AdaptiveHomographyMapper:
                 # Calculate difference AFTER smoothing
                 max_diff_smooth = np.abs(H_candidate - self.H_previous).max()
 
-                # FINAL SAFETY CHECK: Reject if still extreme after smoothing
-                if max_diff_smooth > 100:
+                # FINAL SAFETY CHECK: Adaptive threshold based on context
+                if is_scene_change:
+                    # Scene changes can have larger smoothed diffs - be more permissive
+                    safety_threshold = 200  # Allow up to 200 for scene changes
+                else:
+                    # Normal frames should have small smoothed diffs
+                    safety_threshold = 50   # Strict for normal frames
+
+                if max_diff_smooth > safety_threshold:
                     # Even after median + EMA, change is too large - reject
                     self.matrix_rejected_count += 1
 
                     if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
                         print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED - still unstable after smoothing "
-                              f"(raw: {max_diff_raw:.1f} → smooth: {max_diff_smooth:.1f}) - keeping previous")
+                              f"(raw: {max_diff_raw:.1f} → smooth: {max_diff_smooth:.1f} > threshold: {safety_threshold}) "
+                              f"- keeping previous")
 
                     matrix = self.H_previous.copy()
                     confidence = 0.6
