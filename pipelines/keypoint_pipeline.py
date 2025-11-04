@@ -54,7 +54,7 @@ class KeypointPipeline:
             get_metadata: Whether to calculate additional metadata
 
         Returns:
-            Tuple of (keypoints, metadata) where keypoints has shape (N, 29, 3)
+            Tuple of (keypoints, metadata) where keypoints has shape (N, 32, 3)
             and metadata contains detection information
         """
         if self.model is None:
@@ -84,7 +84,7 @@ class KeypointPipeline:
 
         Args:
             frame: Input frame to annotate
-            keypoints: Detected keypoints array with shape (N, 29, 3)
+            keypoints: Detected keypoints array with shape (N, 32, 3)
             confidence_threshold: Minimum confidence to draw keypoint
             draw_connections: Whether to draw connections between keypoints
             draw_labels: Whether to draw keypoint labels

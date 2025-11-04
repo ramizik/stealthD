@@ -1,13 +1,15 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 import numpy as np
 import supervision as sv
-from tactical_analysis.sports_compat import ViewTransformer, draw_pitch, SoccerPitchConfiguration
 
 from keypoint_detection.keypoint_constants import KEYPOINT_NAMES
+from tactical_analysis.sports_compat import (SoccerPitchConfiguration,
+                                             ViewTransformer, draw_pitch)
 
 
 class HomographyTransformer:
@@ -38,7 +40,7 @@ class HomographyTransformer:
         return np.concatenate((all_pitch_points, extra_pitch_points))
 
     def _get_keypoint_mapping(self):
-        """Get mapping from our 29 keypoints to sports library's points."""
+        """Get mapping from our 32 keypoints to sports library's points."""
         return np.array([
             0,   # 0: sideline_top_left -> corner
             1,   # 1: big_rect_left_top_pt1 -> left penalty
@@ -69,6 +71,10 @@ class HomographyTransformer:
             34,  # 26: right_semicircle_left -> penalty arc
             30,  # 27: center_circle_left -> center_circle_left
             31,  # 28: center_circle_right -> center_circle_right
+            # Additional keypoints from 32-point model (29, 30, 31) - mapping TBD
+            33,  # 29: keypoint_29 -> center point (placeholder)
+            33,  # 30: keypoint_30 -> center point (placeholder)
+            33,  # 31: keypoint_31 -> center point (placeholder)
         ])
 
     def _filter_keypoints(self, detected_keypoints):
@@ -76,7 +82,7 @@ class HomographyTransformer:
         Filter keypoints based on confidence threshold.
 
         Args:
-            detected_keypoints: Array of shape (1, 29, 3) with [x, y, confidence]
+            detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
 
         Returns:
             Tuple of (frame_reference_points, pitch_reference_points, filter_mask)
@@ -128,7 +134,7 @@ class HomographyTransformer:
         Transform pitch keypoints to frame coordinates (for visualization).
 
         Args:
-            detected_keypoints: Array of shape (1, 29, 3) with [x, y, confidence]
+            detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
 
         Returns:
             Tuple of (transformed_points, view_transformer) or (None, None)
@@ -156,7 +162,7 @@ class HomographyTransformer:
         Create ViewTransformer to transform frame coordinates to pitch coordinates.
 
         Args:
-            detected_keypoints: Array of shape (1, 29, 3) with [x, y, confidence]
+            detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
 
         Returns:
             ViewTransformer object or None if insufficient points
@@ -189,5 +195,9 @@ class HomographyTransformer:
             transformed_points = view_transformer.transform_points(points=points)
             return transformed_points
         except Exception as e:
+            print(f"Error transforming points: {e}")
+            return None
+            print(f"Error transforming points: {e}")
+            return None
             print(f"Error transforming points: {e}")
             return None

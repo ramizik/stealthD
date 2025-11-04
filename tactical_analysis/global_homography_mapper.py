@@ -7,15 +7,18 @@ transformation. Provides confidence scores for field regions based on keypoint c
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
-import cv2
-from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
-from tactical_analysis.sports_compat import ViewTransformer, SoccerPitchConfiguration
+import cv2
+import numpy as np
+
+from tactical_analysis.sports_compat import (SoccerPitchConfiguration,
+                                             ViewTransformer)
 
 
 class GlobalHomographyMapper:
@@ -101,7 +104,7 @@ class GlobalHomographyMapper:
         return np.concatenate((all_pitch_points, extra_pitch_points))
 
     def _get_keypoint_mapping(self) -> np.ndarray:
-        """Get mapping from our 29 keypoints to sports library's points."""
+        """Get mapping from our 32 keypoints to sports library's points."""
         return np.array([
             0,   # 0: sideline_top_left -> corner
             1,   # 1: big_rect_left_top_pt1 -> left penalty
@@ -132,6 +135,10 @@ class GlobalHomographyMapper:
             34,  # 26: right_semicircle_left -> penalty arc
             30,  # 27: center_circle_left -> center_circle_left
             31,  # 28: center_circle_right -> center_circle_right
+            # Additional keypoints from 32-point model (29, 30, 31) - mapping TBD
+            33,  # 29: keypoint_29 -> center point (placeholder)
+            33,  # 30: keypoint_30 -> center point (placeholder)
+            33,  # 31: keypoint_31 -> center point (placeholder)
         ])
 
     def add_frame_keypoints(self, frame_idx: int, detected_keypoints: Optional[np.ndarray]):
@@ -140,7 +147,7 @@ class GlobalHomographyMapper:
 
         Args:
             frame_idx: Frame index
-            detected_keypoints: Array of shape (1, 29, 3) with [x, y, confidence]
+            detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
                                or None if no keypoints detected
         """
         self.total_frames_processed += 1
@@ -148,7 +155,7 @@ class GlobalHomographyMapper:
         if detected_keypoints is None or detected_keypoints.shape[0] == 0:
             return
 
-        keypoints = detected_keypoints[0]  # Take first detection (1, 29, 3) -> (29, 3)
+        keypoints = detected_keypoints[0]  # Take first detection (1, 32, 3) -> (32, 3)
 
         # Accumulate each keypoint with sufficient confidence
         keypoints_added = 0
@@ -631,6 +638,12 @@ class GlobalHomographyMapper:
             'total_keypoints_accumulated': self.total_keypoints_accumulated,
             'unique_keypoints_detected': len(self.keypoint_observations),
             'matrix_built': self.matrix_built,
+            'high_confidence_coverage_percent': coverage_percent,
+            'grid_dimensions': (self.grid_width, self.grid_height)
+        }
+            'high_confidence_coverage_percent': coverage_percent,
+            'grid_dimensions': (self.grid_width, self.grid_height)
+        }
             'high_confidence_coverage_percent': coverage_percent,
             'grid_dimensions': (self.grid_width, self.grid_height)
         }

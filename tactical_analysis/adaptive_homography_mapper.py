@@ -68,7 +68,7 @@ class AdaptiveHomographyMapper:
 
         Args:
             frame_idx: Frame index
-            yolo_keypoints: YOLO pose keypoints (29, 3) or None
+            yolo_keypoints: YOLO pose keypoints (32, 3) or None
         """
         self.total_frames_processed += 1
 
@@ -103,12 +103,12 @@ class AdaptiveHomographyMapper:
 
     def _get_yolo_keypoint_mapping(self, kp_idx: int) -> Optional[int]:
         """
-        Map YOLO keypoint index (29 keypoints) to pitch point index (32 points).
+        Map YOLO keypoint index (32 keypoints) to pitch point index (35 points).
 
         The mapping ensures YOLO detected keypoints correspond to the correct
-        pitch reference points from our 32-point configuration.
+        pitch reference points from our 35-point configuration.
         """
-        # Mapping from 29 YOLO keypoints to 32 pitch points (0-indexed)
+        # Mapping from 32 YOLO keypoints to 35 pitch points (0-indexed)
         mapping = np.array([
             0,   # 0 -> Point 1 (top-left corner)
             1,   # 1 -> Point 2 (left penalty area top)
@@ -139,6 +139,9 @@ class AdaptiveHomographyMapper:
             26,  # 26 -> Point 27 (right goal area top)
             27,  # 27 -> Point 28 (right goal area bottom)
             28,  # 28 -> Point 29 (right penalty area bottom)
+            29,  # 29 -> Additional keypoint (placeholder)
+            30,  # 30 -> Additional keypoint (placeholder)
+            31,  # 31 -> Additional keypoint (placeholder)
         ])
         if kp_idx < len(mapping):
             return int(mapping[kp_idx])
