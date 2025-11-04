@@ -100,29 +100,56 @@ class SpeedCalculator:
 
     def calculate_field_coordinates(self, pixel_coords: np.ndarray, global_mapper,
                                     video_dimensions: Tuple[int, int],
-                                    frame_idx: int = None, debug_stats: dict = None) -> Tuple[Optional[np.ndarray], str]:
+                                    frame_idx: int = None, player_id: int = None,
+                                    per_frame_keypoints: Dict = None) -> Tuple[Optional[np.ndarray], str]:
         """
-        Convert pixel coordinates to field coordinates using global homography mapper.
+        Convert pixel coordinates to field coordinates using ROBUST multi-tier system.
+
+        NEVER returns None - always provides best-effort coordinates.
 
         Args:
             pixel_coords: Array of shape (N, 2) with [x, y] pixel coordinates
-            global_mapper: GlobalHomographyMapper object
+            global_mapper: GlobalHomographyMapper object with transform_points_robust()
             video_dimensions: (width, height) of video in pixels
-            frame_idx: Frame index for logging (optional)
-            debug_stats: Dictionary to track transformation method usage (optional)
+            frame_idx: Frame index for temporal fallback
+            player_id: Player ID for position memory fallback
+            per_frame_keypoints: This frame's keypoint detections for per-frame homography
 
         Returns:
-            Tuple of (Array of shape (N, 2) with field coordinates in meters or None if low confidence,
+            Tuple of (Array of shape (N, 2) with field coordinates in METERS,
                      transformation_method string)
+            ALWAYS returns coordinates - never None
         """
         if len(pixel_coords) == 0:
             return np.array([]).reshape(0, 2), 'empty'
 
+        # Use robust transformation
+        if hasattr(global_mapper, 'transform_points_robust'):
+            pitch_coords, method = global_mapper.transform_points_robust(
+                pixel_coords,
+                frame_idx=frame_idx,
+                player_id=player_id,
+                video_dimensions=video_dimensions,
+                per_frame_keypoints=per_frame_keypoints
+            )
+
+            # Convert from pitch coordinate system (12000x7000) to meters (105x68)
+            field_coords = pitch_coords.copy()
+            field_coords[:, 0] = field_coords[:, 0] * (self.field_width / 12000.0)
+            field_coords[:, 1] = field_coords[:, 1] * (self.field_height / 7000.0)
+
+            return field_coords, method
+
+        # Fallback to old method if transform_points_robust not available
+        else:
+            print("[WARNING] Using legacy transformation - upgrade GlobalHomographyMapper!")
+            return self._legacy_transform(pixel_coords, global_mapper, video_dimensions, frame_idx)
+
+    def _legacy_transform(self, pixel_coords: np.ndarray, global_mapper,
+                         video_dimensions: Tuple[int, int], frame_idx: int = None) -> Tuple[Optional[np.ndarray], str]:
+        """Legacy transformation method - returns None on failure."""
         # Check if global mapper is built
         if not hasattr(global_mapper, 'matrix_built') or not global_mapper.matrix_built:
-            # Fallback to conservative linear scaling if no global homography
-            if debug_stats is not None:
-                debug_stats['linear_fallback'] += 1
             return self._conservative_linear_scale(pixel_coords, video_dimensions), 'linear_fallback'
 
         try:
@@ -130,37 +157,23 @@ class SpeedCalculator:
             field_coords_raw, confidence = global_mapper.transform_points(pixel_coords)
 
             # Convert from pitch coordinate system to meters
-            # SoccerPitchConfiguration uses 12000x7000 units for 105x68m pitch
-            # Scale: X axis: 12000 units = 105m, Y axis: 7000 units = 68m
             field_coords = field_coords_raw.copy()
             field_coords[:, 0] = field_coords[:, 0] * (self.field_width / 12000.0)
             field_coords[:, 1] = field_coords[:, 1] * (self.field_height / 7000.0)
 
             # Check if coordinates are in reasonable bounds
             if self._is_catastrophically_bad(field_coords):
-                if debug_stats is not None:
-                    debug_stats['catastrophic_failures'] += 1
-                # Return None to skip this position
                 return None, 'catastrophic_failure'
 
             # Check if position has sufficient keypoint coverage
             if len(field_coords) > 0:
                 x_meters, y_meters = field_coords[0]
                 if not global_mapper.is_position_reliable(x_meters, y_meters, min_confidence=0.7):
-                    if debug_stats is not None:
-                        debug_stats['low_confidence'] = debug_stats.get('low_confidence', 0) + 1
-                    # Return None to skip this position
                     return None, 'low_confidence'
-
-            if debug_stats is not None:
-                debug_stats['global_homography_success'] = debug_stats.get('global_homography_success', 0) + 1
 
             return field_coords, 'global_homography'
 
         except Exception as e:
-            if debug_stats is not None:
-                debug_stats['homography_failed'] += 1
-            # Fallback to conservative linear scaling
             return self._conservative_linear_scale(pixel_coords, video_dimensions), 'linear_fallback'
 
     def _get_bbox_center(self, bbox: list) -> Tuple[float, float]:
@@ -180,11 +193,11 @@ class SpeedCalculator:
     def calculate_speeds(self, player_tracks: Dict, global_mapper,
                         video_dimensions: Tuple[int, int]) -> Dict:
         """
-        Calculate speeds for all players across all frames using global homography.
+        Calculate speeds for all players across all frames using ROBUST transformation.
 
         Args:
             player_tracks: Dictionary {frame_idx: {player_id: [x1, y1, x2, y2]}}
-            global_mapper: GlobalHomographyMapper object
+            global_mapper: GlobalHomographyMapper object with transform_points_robust()
             video_dimensions: (width, height) of video in pixels
 
         Returns:
@@ -201,17 +214,7 @@ class SpeedCalculator:
         """
         player_speeds = {}
 
-        # DEBUG: Track transformation method usage
-        debug_stats = {
-            'global_homography_success': 0,
-            'homography_failed': 0,
-            'linear_fallback': 0,
-            'catastrophic_failures': 0,
-            'low_confidence': 0,
-            'positions_skipped': 0
-        }
-
-        print(f"\n[SPEED DEBUG] Starting speed calculation with global homography:")
+        print(f"\n[SPEED DEBUG] Starting speed calculation with ROBUST multi-tier transformation:")
         print(f"   Video dimensions: {video_dimensions}")
         print(f"   Field dimensions: {self.field_width}m x {self.field_height}m")
         print(f"   FPS: {self.fps}")
@@ -256,14 +259,16 @@ class SpeedCalculator:
                 # Get foot position (bottom center) for players - more accurate for speed calculation
                 foot_pos = np.array([self._get_foot_position(bbox)])
 
-                # Convert to field coordinates using global homography
+                # Convert to field coordinates using ROBUST multi-tier transformation
+                # ALWAYS returns coordinates - never None
                 field_coord, transform_method = self.calculate_field_coordinates(
-                    foot_pos, global_mapper, video_dimensions, frame_idx, debug_stats
+                    foot_pos, global_mapper, video_dimensions,
+                    frame_idx=frame_idx, player_id=player_id
                 )
 
-                # Skip if coordinate conversion failed or is low confidence
+                # Should never be None with robust transform, but check anyway
                 if field_coord is None or len(field_coord) == 0:
-                    debug_stats['positions_skipped'] += 1
+                    print(f"[WARNING] Unexpected None coordinate for player {player_id} frame {frame_idx}")
                     continue
 
                 field_coord = field_coord[0]  # Get single point
@@ -338,21 +343,9 @@ class SpeedCalculator:
                     '_debug_max_speed_sample': max_speed_sample  # Store for debug
                 }
 
-        # DEBUG: Print summary statistics
-        print(f"\n[SPEED DEBUG] Transformation Statistics:")
-        print(f"   Global homography success: {debug_stats.get('global_homography_success', 0)}")
-        print(f"   Homography failed: {debug_stats.get('homography_failed', 0)}")
-        print(f"   Catastrophic failures: {debug_stats.get('catastrophic_failures', 0)}")
-        print(f"   Low confidence positions: {debug_stats.get('low_confidence', 0)}")
-        print(f"   Linear fallback used: {debug_stats.get('linear_fallback', 0)}")
-        print(f"   Positions skipped: {debug_stats.get('positions_skipped', 0)}")
-
-        # Calculate success rate
-        total_attempts = sum(debug_stats.values())
-        success_count = debug_stats.get('global_homography_success', 0)
-        if total_attempts > 0:
-            success_rate = 100.0 * success_count / total_attempts
-            print(f"   Success rate: {success_rate:.1f}%")
+        # Print debug statistics from GlobalHomographyMapper
+        if hasattr(global_mapper, 'print_debug_stats'):
+            global_mapper.print_debug_stats()
 
         # Find top 5 fastest players
         if player_speeds:
@@ -365,8 +358,9 @@ class SpeedCalculator:
                 max_sample = data.get('_debug_max_speed_sample')
                 if max_sample:
                     print(f"   {rank}. Player {pid}: {data['max_speed_kmh']:.2f} km/h (avg: {data['average_speed_kmh']:.2f} km/h)")
-                    print(f"      Max speed: {max_sample['speed_kmh']:.2f} km/h "
-                          f"({'FILTERED' if max_sample['filtered'] else 'accepted'})")
+                    if 'filtered' in max_sample:
+                        print(f"      Max speed: {max_sample['speed_kmh']:.2f} km/h "
+                              f"({'FILTERED' if max_sample['filtered'] else 'accepted'})")
                     print(f"      Distance: {max_sample['distance_m']:.2f}m over {max_sample['frame_diff']} frames "
                           f"({max_sample['time_diff']:.3f}s)")
                     print(f"      From frame {max_sample['from_frame']} to {max_sample['to_frame']}")
