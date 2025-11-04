@@ -187,48 +187,29 @@ class AdaptiveHomographyMapper:
         pitch_points = np.array(pitch_points, dtype=np.float32)
 
         try:
-            # Build homography with RANSAC
-            matrix, mask = cv2.findHomography(
-                pixel_points,
-                pitch_points,
-                cv2.RANSAC,
-                5.0
-            )
+            # MATCH RESEARCH CODE: Use DEFAULT cv2.findHomography (NO RANSAC)
+            # Research: self.m, _ = cv2.findHomography(source, target)
+            # They do NOT use RANSAC - just trust the spatially filtered keypoints
+            matrix, _ = cv2.findHomography(pixel_points, pitch_points)
 
             if matrix is None:
-                return False
-
-            # Calculate confidence based on inlier ratio
-            inliers = np.sum(mask) if mask is not None else 0
-            confidence = inliers / len(keypoints) if len(keypoints) > 0 else 0.0
-
-            # DEBUG: Log homography attempts for first 5 frames
-            if frame_idx < 5:
-                print(f"[Adaptive Homography] Frame {frame_idx}: Homography attempt - "
-                      f"keypoints: {len(keypoints)}, inliers: {inliers}, confidence: {confidence:.2f}")
-
-            # LOWER THRESHOLD: Research code doesn't specify, but with only 20% inliers we need to be less strict
-            # Adaptive mapper should be more permissive than global mapper
-            if confidence > 0.15:  # Accept if at least 15% inliers (was 0.3)
-                self.frame_homographies[frame_idx] = matrix
-                self.frame_confidences[frame_idx] = float(confidence)
-
-                # Log first 3 successful builds
-                if len(self.frame_homographies) <= 3:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ ACCEPTED "
-                          f"(confidence: {confidence:.2f}, inliers: {inliers}/{len(keypoints)})")
-                return True
-            else:
-                # Log rejections for first 5 frames
                 if frame_idx < 5:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Low confidence "
-                          f"({confidence:.2f}, inliers: {inliers}/{len(keypoints)})")
+                    print(f"[Adaptive Homography] Frame {frame_idx}: Homography calculation failed")
                 return False
+
+            # SUCCESS - Store the homography matrix
+            self.frame_homographies[frame_idx] = matrix
+            self.frame_confidences[frame_idx] = 1.0  # Full confidence when using all points
+
+            # Log first 3 successful builds
+            if len(self.frame_homographies) <= 3:
+                print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built homography from {len(keypoints)} keypoints")
+
+            return True
 
         except Exception as e:
             print(f"[Adaptive Homography] Frame {frame_idx}: Homography failed - {e}")
-
-        return False
+            return False
 
     def transform_point(self, frame_idx: int, pixel_coord: np.ndarray,
                        camera_motion: Optional[Tuple[float, float]] = None) -> Tuple[np.ndarray, str, float]:

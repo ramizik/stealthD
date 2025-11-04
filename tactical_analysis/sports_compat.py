@@ -15,12 +15,14 @@ class ViewTransformer:
     """
     ViewTransformer for perspective transformation using homography.
 
-    Uses cv2.findHomography (not getPerspectiveTransform) because the number of
-    detected keypoints changes as the camera moves. findHomography computes the
-    homography matrix that best maps the source points to target points using RANSAC.
+    MATCHES RESEARCH CODE APPROACH:
+    Uses cv2.findHomography() with DEFAULT method (no RANSAC) because:
+    - Keypoints are already filtered spatially (x > 1, y > 1)
+    - RANSAC is too strict for partial pitch views (rejects valid points)
+    - Research code trusts YOLO's keypoint detection quality
 
-    This allows us to handle varying numbers of visible keypoints (4 to 32) as the
-    camera pans and zooms during the match.
+    Uses findHomography (not getPerspectiveTransform) to handle varying numbers
+    of visible keypoints (4 to 32) as camera pans and zooms during the match.
     """
 
     def __init__(
@@ -49,8 +51,10 @@ class ViewTransformer:
         source = source.astype(np.float32)
         target = target.astype(np.float32)
 
-        # Use findHomography with RANSAC for robustness
-        self.m, _ = cv2.findHomography(source, target, cv2.RANSAC, 5.0)
+        # MATCH RESEARCH CODE: Use DEFAULT findHomography (NO RANSAC)
+        # Research code: self.m, _ = cv2.findHomography(source, target)
+        # They trust the spatially filtered keypoints, no RANSAC outlier rejection
+        self.m, _ = cv2.findHomography(source, target)
 
         if self.m is None:
             raise ValueError("Homography matrix could not be calculated.")
