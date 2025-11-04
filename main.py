@@ -940,4 +940,4 @@ if __name__ == "__main__":
     print(f"\nAnalysis finished!")
     print(f"Output video: {output_video}")
     print(f"Analysis data (JSON): {json_output}")
-    print(f"LLM-ready data (JSON): {llm_json_output}")    print(f"LLM-ready data (JSON): {llm_json_output}")    print(f"LLM-ready data (JSON): {llm_json_output}")
+    print(f"LLM-ready data (JSON): {llm_json_output}")

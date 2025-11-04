@@ -157,12 +157,15 @@ class GlobalHomographyMapper:
 
         keypoints = detected_keypoints[0]  # Take first detection (1, 32, 3) -> (32, 3)
 
-        # Accumulate each keypoint with sufficient confidence
+        # Accumulate each keypoint with sufficient confidence AND spatial validity
+        # CRITICAL FIX (from research code): Exclude invalid keypoints (x<=1, y<=1)
+        # that corrupt homography calculation
         keypoints_added = 0
         for kp_idx in range(len(keypoints)):
             x, y, conf = keypoints[kp_idx]
 
-            if conf > self.confidence_threshold:
+            # Combined confidence + spatial filtering (matches HomographyTransformer)
+            if conf > self.confidence_threshold and x > 1 and y > 1:
                 # Get corresponding pitch point
                 pitch_idx = self.our_to_sports_mapping[kp_idx]
                 pitch_point = self.all_pitch_points[pitch_idx]

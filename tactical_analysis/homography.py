@@ -79,7 +79,7 @@ class HomographyTransformer:
 
     def _filter_keypoints(self, detected_keypoints):
         """
-        Filter keypoints based on confidence threshold.
+        Filter keypoints based on confidence threshold AND spatial validity.
 
         Args:
             detected_keypoints: Array of shape (1, 32, 3) with [x, y, confidence]
@@ -92,19 +92,23 @@ class HomographyTransformer:
 
         keypoints = detected_keypoints[0]  # Take first detection
 
-        # Create confidence filter
-        filter_mask = keypoints[:, 2] > self.confidence_threshold
+        # CRITICAL: Filter out invalid keypoints using BOTH confidence AND spatial checks
+        # Research code insight: keypoints with x<=1 or y<=1 are undetected/invalid
+        confidence_mask = keypoints[:, 2] > self.confidence_threshold
+        spatial_mask = (keypoints[:, 0] > 1) & (keypoints[:, 1] > 1)
+        filter_mask = confidence_mask & spatial_mask
 
-        if np.sum(filter_mask) < 4:
-            print(f"Insufficient valid keypoints: {np.sum(filter_mask)} < 4")
+        valid_count = np.sum(filter_mask)
+        if valid_count < 4:
+            # print(f"[Homography] Insufficient valid keypoints: {valid_count} < 4")
             return None, None, None
 
         # Apply filter to get frame reference points
-        frame_reference_points = keypoints[filter_mask, :2]  # Only x, y coordinates
+        frame_reference_points = keypoints[filter_mask, :2].astype(np.float32)
 
         # Apply the same filter to get corresponding pitch points
         pitch_indices = self.our_to_sports_mapping[filter_mask]
-        pitch_reference_points = self.all_pitch_points[pitch_indices]
+        pitch_reference_points = self.all_pitch_points[pitch_indices].astype(np.float32)
 
         return frame_reference_points, pitch_reference_points, filter_mask
 
