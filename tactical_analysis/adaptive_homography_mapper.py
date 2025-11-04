@@ -243,6 +243,7 @@ class AdaptiveHomographyMapper:
                 # First frame - no smoothing possible
                 H_candidate = H_median
                 self.H_smooth = H_median
+                matrix = H_median  # ← FIX: Set matrix variable for first frame
                 confidence = 1.0
 
                 if frame_idx < 3:
@@ -324,8 +325,6 @@ class AdaptiveHomographyMapper:
                     else:
                         print(f"[Adaptive Homography] Frame {frame_idx}: ✓ EMA smoothed "
                               f"(diff: {max_diff_smooth:.1f}, alpha: {alpha})")
-
-                matrix = H_candidate
 
             # Update previous matrix for next frame comparison
             self.H_previous = matrix.copy()
