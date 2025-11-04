@@ -400,6 +400,45 @@ class TrackingPipeline:
 
         return annotated_frames
 
+    def annotate_single_frame(self, frame, frame_idx, tracks):
+        """
+        Annotate a single frame with tracking results.
+
+        Args:
+            frame: Input video frame
+            frame_idx: Frame index
+            tracks: Tracking results dictionary
+
+        Returns:
+            Annotated frame
+        """
+        # Get tracks for this frame
+        player_tracks = tracks['player'].get(frame_idx, {})
+        ball_tracks = tracks['ball'].get(frame_idx, [None]*4)
+        referee_tracks = tracks['referee'].get(frame_idx, {})
+        player_classids = tracks.get('player_classids', {}).get(frame_idx, None)
+
+        # Clean up invalid tracks
+        if -1 in player_tracks:
+            player_tracks = None
+            player_classids = None
+        if -1 in referee_tracks:
+            referee_tracks = None
+        if (not all(ball_tracks)) or np.isnan(ball_tracks).all():
+            ball_tracks = None
+
+        # Convert to detections with stored class IDs
+        player_detections, ball_detections, referee_detections = self.annotator_manager.convert_tracks_to_detections(
+            player_tracks, ball_tracks, referee_tracks, player_classids
+        )
+
+        # Annotate frame
+        annotated_frame = self.annotator_manager.annotate_all(
+            frame, player_detections, ball_detections, referee_detections
+        )
+
+        return annotated_frame
+
     def track_in_video(self, video_path: str, output_path: str, frame_count: int = -1):
         """Analyze a complete video with tracking and team assignment.
 

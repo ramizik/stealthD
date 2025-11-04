@@ -151,17 +151,29 @@ class CompleteSoccerAnalysisPipeline:
             cap = cv2.VideoCapture(str(video_path))
             ret, first_frame = cap.read()
             cap.release()
-            camera_estimator = CameraMovementEstimator(first_frame)
+            if ret:
+                camera_estimator = CameraMovementEstimator(first_frame)
+            else:
+                print(f"  WARNING: Could not read first frame")
+                camera_estimator = None
         else:
-            print(f"  Loading frames for camera movement estimation...")
-            frames_for_camera = self.processing_pipeline.read_video_frames(video_path, frame_count)
-            camera_estimator = CameraMovementEstimator(frames_for_camera[0])
-            camera_movement = camera_estimator.get_camera_movement(
-                frames_for_camera, read_from_stub=True, stub_path=stub_path
-            )
-            # Clear frames from memory after camera estimation
-            del frames_for_camera
-            self._clear_memory()
+            # Use STREAMING camera movement estimation (memory-efficient)
+            print(f"  Estimating camera movement with streaming (memory-efficient)...")
+            # Get first frame for estimator initialization
+            cap = cv2.VideoCapture(str(video_path))
+            ret, first_frame = cap.read()
+            cap.release()
+
+            if ret:
+                camera_estimator = CameraMovementEstimator(first_frame)
+                # Use streaming method instead of loading all frames
+                camera_movement = camera_estimator.get_camera_movement_streaming(
+                    str(video_path), total_frames, read_from_stub=True, stub_path=stub_path
+                )
+            else:
+                print(f"  WARNING: Could not read first frame")
+                camera_estimator = None
+                camera_movement = None
 
         print(f"  Camera movement estimated (will apply compensation after speed calculation)")
 
@@ -237,13 +249,17 @@ class CompleteSoccerAnalysisPipeline:
 
         # Step 5.6: Now apply camera compensation for track stitching and visualization
         print("\n[Step 5.6/8] Applying camera movement compensation for visualization...")
-        all_tracks = camera_estimator.compensate_track_positions(
-            all_tracks, camera_movement
-        )
-        print(f"  Camera movement compensation applied to tracks")
+        if camera_estimator is not None and camera_movement is not None:
+            all_tracks = camera_estimator.compensate_track_positions(
+                all_tracks, camera_movement
+            )
+            print(f"  Camera movement compensation applied to tracks")
+        else:
+            print(f"  Skipping camera movement compensation (estimator not available)")
 
         # Clear memory before annotation
-        del camera_estimator
+        if camera_estimator is not None:
+            del camera_estimator
         self._clear_memory()
         self._print_memory_status("After Analytics")
 
@@ -253,30 +269,34 @@ class CompleteSoccerAnalysisPipeline:
         # (Analytics used original positions, but tracks are now compensated for storage)
         import copy
         annotation_tracks = copy.deepcopy(all_tracks)
-        annotation_tracks = camera_estimator.restore_camera_positions(annotation_tracks, camera_movement)
+        if camera_movement is not None:
+            from camera_analysis import CameraMovementEstimator
+            # Recreate estimator for restoration (lightweight operation)
+            cap = cv2.VideoCapture(str(video_path))
+            ret, first_frame = cap.read()
+            cap.release()
+            if ret:
+                temp_estimator = CameraMovementEstimator(first_frame)
+                annotation_tracks = temp_estimator.restore_camera_positions(annotation_tracks, camera_movement)
+                del temp_estimator
 
-        # NOW load frames into memory for annotation (only when needed)
-        print("  Loading video frames for annotation...")
-        frames = self.processing_pipeline.read_video_frames(video_path, frame_count)
-        print(f"  Loaded {len(frames)} frames")
-        self._print_memory_status("After Loading Frames for Annotation")
+        # Step 7: Write final output video with STREAMING annotation (memory-efficient)
+        print("\n[Step 7/8] Annotating and writing video with streaming (memory-efficient)...")
+        output_path = self.processing_pipeline.generate_output_path(video_path, output_suffix)
 
-        object_annotated_frames = self.tracking_pipeline.annotate_frames(frames, annotation_tracks)
+        # Get video FPS
+        video_info = sv.VideoInfo.from_video_path(video_path)
+
+        # Define annotation callback for streaming
+        def annotate_callback(frame, frame_idx, tracks):
+            return self.tracking_pipeline.annotate_single_frame(frame, frame_idx, tracks)
+
+        # Stream, annotate, and write frames without loading all into memory
+        self.processing_pipeline.write_video_streaming(
+            video_path, output_path, annotation_tracks, annotate_callback, total_frames, fps=video_info.fps
+        )
 
         # Clear annotation tracks from memory
-        del annotation_tracks
-        self._clear_memory()
-
-        # Step 7: Write final output video
-        output_frames = object_annotated_frames
-        print("\n[Step 7/8] Writing complete analysis video...")
-        output_path = self.processing_pipeline.generate_output_path(video_path, output_suffix)
-        self.processing_pipeline.write_video_output(output_frames, output_path)
-
-        # Clear large frame data from memory
-        del frames
-        del object_annotated_frames
-        del output_frames
         del annotation_tracks
         self._clear_memory()
         self._print_memory_status("After Video Output")
@@ -294,7 +314,7 @@ class CompleteSoccerAnalysisPipeline:
         # Generate JSON paths in same output folder as the video
         output_path_obj = Path(output_path)
         json_output_path = str(output_path_obj.parent / f"{output_path_obj.stem}_analysis_data.json")
-        analysis_data = self._prepare_analysis_json(all_tracks, total_time, len(frames), metrics_data, id_mapping_info)
+        analysis_data = self._prepare_analysis_json(all_tracks, total_time, total_frames, metrics_data, id_mapping_info)
 
         # JSON conversion is now handled in _prepare_analysis_json via convert_to_serializable
         # Apply conversion to ensure all numpy types are converted before serialization
