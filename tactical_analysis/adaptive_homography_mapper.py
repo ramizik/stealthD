@@ -197,6 +197,17 @@ class AdaptiveHomographyMapper:
                     print(f"[Adaptive Homography] Frame {frame_idx}: Homography calculation failed")
                 return False
 
+            # CHECK HOMOGRAPHY STABILITY: Compare with previous frame
+            # Large changes in homography matrix indicate instability
+            if frame_idx > 0 and (frame_idx - 1) in self.frame_homographies:
+                prev_matrix = self.frame_homographies[frame_idx - 1]
+                matrix_diff = np.abs(matrix - prev_matrix).max()
+
+                # Warn about large changes (potential instability)
+                if matrix_diff > 0.5 and frame_idx < 10:  # Log first 10 unstable frames
+                    print(f"[Adaptive Homography] Frame {frame_idx}: WARNING - Large matrix change "
+                          f"(max_diff: {matrix_diff:.3f}) - may cause position jumps")
+
             # SUCCESS - Store the homography matrix
             self.frame_homographies[frame_idx] = matrix
             self.frame_confidences[frame_idx] = 1.0  # Full confidence when using all points

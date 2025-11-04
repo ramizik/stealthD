@@ -297,6 +297,14 @@ class SpeedCalculator:
                     frame_diff = frame_idx - prev_frame_idx
                     time_diff = frame_diff / self.fps
 
+                    # DEBUG: Log large position jumps (likely homography instability)
+                    if distance > 10 and frame_diff == 1:  # >10m in 1 frame = likely error
+                        print(f"[HOMOGRAPHY DEBUG] Player {player_id} Frame {prev_frame_idx}→{frame_idx}: "
+                              f"LARGE JUMP {distance:.2f}m in {time_diff:.3f}s "
+                              f"({prev_field_coord[0]:.2f}, {prev_field_coord[1]:.2f}) → "
+                              f"({field_coord[0]:.2f}, {field_coord[1]:.2f}) "
+                              f"| Method: {transform_method}")
+
                     # Calculate speed in meters per second, then convert to km/h
                     if time_diff > 0:
                         instant_speed = distance / time_diff
