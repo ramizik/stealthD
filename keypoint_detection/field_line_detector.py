@@ -60,6 +60,9 @@ class FieldLineDetector:
                 - 'confidence': Quality score [0, 1]
                 - 'field_mask': Binary mask of detected field
         """
+        # Store frame dimensions for bounds checking
+        self.frame_height, self.frame_width = frame.shape[:2]
+
         # Convert to grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -173,7 +176,7 @@ class FieldLineDetector:
             vertical_lines: List of vertical line segments
 
         Returns:
-            List of (x, y) intersection points
+            List of (x, y) intersection points within frame bounds
         """
         intersections = []
 
@@ -183,14 +186,20 @@ class FieldLineDetector:
             for v_line in vertical_lines:
                 x1v, y1v, x2v, y2v = v_line
 
-                # Find intersection point
+                # Find intersection point (infinite line extension)
                 intersection = self._line_intersection(
                     (x1h, y1h), (x2h, y2h),
                     (x1v, y1v), (x2v, y2v)
                 )
 
                 if intersection is not None:
-                    intersections.append(intersection)
+                    x, y = intersection
+
+                    # Filter: Keep only intersections within frame bounds (with small margin)
+                    margin = 50  # Allow intersections slightly outside frame
+                    if (-margin <= x <= self.frame_width + margin and
+                        -margin <= y <= self.frame_height + margin):
+                        intersections.append(intersection)
 
         # Remove duplicate intersections (within tolerance)
         intersections = self._remove_duplicate_points(intersections)
@@ -200,14 +209,17 @@ class FieldLineDetector:
     def _line_intersection(self, p1: Tuple[float, float], p2: Tuple[float, float],
                           p3: Tuple[float, float], p4: Tuple[float, float]) -> Optional[Tuple[float, float]]:
         """
-        Find intersection point of two line segments.
+        Find intersection point of two infinite lines (extended from segments).
+
+        For Hough lines, we extend the segments infinitely to find intersections
+        since field line segments may not directly overlap at corners.
 
         Args:
             p1, p2: Points defining first line
             p3, p4: Points defining second line
 
         Returns:
-            Intersection point (x, y) or None if lines don't intersect
+            Intersection point (x, y) or None if lines are parallel
         """
         x1, y1 = p1
         x2, y2 = p2
@@ -216,19 +228,17 @@ class FieldLineDetector:
 
         denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
 
+        # Lines are parallel or coincident
         if abs(denom) < 1e-6:
             return None
 
+        # Calculate intersection point (without segment bounds check)
         t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
 
-        # Check if intersection is within line segments
-        if 0 <= t <= 1 and 0 <= u <= 1:
-            x = x1 + t * (x2 - x1)
-            y = y1 + t * (y2 - y1)
-            return (float(x), float(y))
+        x = x1 + t * (x2 - x1)
+        y = y1 + t * (y2 - y1)
 
-        return None
+        return (float(x), float(y))
 
     def _remove_duplicate_points(self, points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """Remove duplicate points within tolerance."""
