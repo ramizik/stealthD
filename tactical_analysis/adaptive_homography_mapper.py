@@ -219,78 +219,113 @@ class AdaptiveHomographyMapper:
             # MATCH RESEARCH CODE: Use DEFAULT cv2.findHomography (NO RANSAC)
             # Research: self.m, _ = cv2.findHomography(source, target)
             # They do NOT use RANSAC - just trust the spatially filtered keypoints
-            H_new, _ = cv2.findHomography(pixel_points, pitch_points)
+            H_raw, _ = cv2.findHomography(pixel_points, pitch_points)
 
-            if H_new is None:
+            if H_raw is None:
                 if frame_idx < 5:
                     print(f"[Adaptive Homography] Frame {frame_idx}: Homography calculation failed")
                 return False
 
             num_keypoints = len(keypoints)
 
-            # STEP 1: Apply EMA smoothing FIRST (before validation)
+            # STEP 1: Add to buffer for MEDIAN FILTERING (like BallTracker)
+            self.H_buffer.append(H_raw)
+
+            # Apply median filtering if we have enough history
+            if len(self.H_buffer) >= 3:
+                # Use median of last 3-5 matrices to remove outliers
+                H_median = np.median(self.H_buffer, axis=0)
+            else:
+                H_median = H_raw
+
+            # STEP 2: Check if this is first frame or detect scene changes
             if self.H_previous is None:
                 # First frame - no smoothing possible
-                H_candidate = H_new
-                self.H_smooth = H_new
+                H_candidate = H_median
+                self.H_smooth = H_median
                 confidence = 1.0
 
                 if frame_idx < 3:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built homography from {num_keypoints} keypoints")
+                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built initial homography from {num_keypoints} keypoints")
             else:
-                # Exponential Moving Average: H_smooth = alpha*H_new + (1-alpha)*H_previous
-                H_candidate = self.ema_alpha * H_new + (1 - self.ema_alpha) * self.H_previous
-                self.H_smooth = H_candidate
-                confidence = 1.0
+                # Calculate difference from previous frame (using median-filtered matrix)
+                max_diff_raw = np.abs(H_median - self.H_previous).max()
 
-            # STEP 2: Validate SMOOTHED matrix (not raw H_new)
-            if self.H_previous is not None:
-                matrix_diff = np.abs(H_candidate - self.H_previous).max()
+                # SCENE CHANGE DETECTION with smart thresholds
+                is_scene_change = False
+                should_reject = False
 
-                # Adaptive threshold based on keypoint count
-                if num_keypoints >= 20:
-                    threshold = 10.0  # Strict for many keypoints
-                elif num_keypoints >= 12:
-                    threshold = 20.0  # Medium threshold
-                else:
-                    threshold = 30.0  # Lenient for few keypoints
+                if max_diff_raw > 200:
+                    # Large change detected - could be scene change OR bad detection
+                    if num_keypoints >= 20:
+                        # Good keypoints + large change = likely real scene change
+                        # Use faster adaptation but still smooth
+                        is_scene_change = True
+                        alpha = 0.5  # 50% new, 50% old for scene changes
 
-                # Check if smoothed matrix is still unstable
-                if matrix_diff > threshold:
-                    # Large change detected - check if it's a valid scene change
-                    if num_keypoints >= 15:
-                        # Good keypoints + large change = likely scene cut, accept it
                         if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
-                            print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ Large change "
-                                  f"(diff: {matrix_diff:.1f}) but {num_keypoints} keypoints - "
-                                  f"accepting as scene change")
-                        matrix = H_candidate
-                        confidence = 0.9
+                            print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Scene change detected "
+                                  f"(diff: {max_diff_raw:.1f}, {num_keypoints} keypoints) - using alpha={alpha}")
                     else:
-                        # Few keypoints + large change = reject
-                        self.matrix_rejected_count += 1
+                        # Large change + few keypoints = BAD data, reject completely
+                        should_reject = True
 
-                        if self.matrix_rejected_count <= 10 or frame_idx % 100 == 0:
+                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
                             print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED unstable matrix "
-                                  f"(diff: {matrix_diff:.1f} > threshold: {threshold}, only {num_keypoints} keypoints)")
-
-                        # Reuse previous matrix
-                        matrix = self.H_previous.copy()
-                        confidence = 0.7
+                                  f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints) - keeping previous")
                 else:
-                    # Smoothed matrix is stable - accept it
-                    matrix = H_candidate
+                    # Normal frame - use slow, stable smoothing
+                    alpha = 0.2  # 20% new, 80% old for normal frames
 
-                    # Log first 5 successful smoothings
-                    if self.homography_success_count < 5:
-                        print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Applied EMA smoothing "
-                              f"(diff: {matrix_diff:.1f}, alpha: {self.ema_alpha})")
-            else:
-                # First frame
+                if should_reject:
+                    # Reject this frame - keep previous matrix
+                    self.matrix_rejected_count += 1
+                    matrix = self.H_previous.copy()
+                    confidence = 0.7
+
+                    # Store and continue (don't update H_previous)
+                    self.frame_homographies[frame_idx] = matrix
+                    self.frame_confidences[frame_idx] = confidence
+                    return True
+
+                # STEP 3: Apply EMA smoothing with adaptive alpha
+                H_candidate = alpha * H_median + (1.0 - alpha) * self.H_previous
+                self.H_smooth = H_candidate
+
+                # Calculate difference AFTER smoothing
+                max_diff_smooth = np.abs(H_candidate - self.H_previous).max()
+
+                # FINAL SAFETY CHECK: Reject if still extreme after smoothing
+                if max_diff_smooth > 100:
+                    # Even after median + EMA, change is too large - reject
+                    self.matrix_rejected_count += 1
+
+                    if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED - still unstable after smoothing "
+                              f"(raw: {max_diff_raw:.1f} → smooth: {max_diff_smooth:.1f}) - keeping previous")
+
+                    matrix = self.H_previous.copy()
+                    confidence = 0.6
+
+                    # Store and continue
+                    self.frame_homographies[frame_idx] = matrix
+                    self.frame_confidences[frame_idx] = confidence
+                    return True
+
+                # Accept smoothed matrix
                 matrix = H_candidate
+                confidence = 0.9 if is_scene_change else 1.0
 
-            # Add to buffer for optional median filtering
-            self.H_buffer.append(H_new)
+                # Log first 5 successful smoothings or scene changes
+                if self.homography_success_count < 5 or is_scene_change:
+                    if is_scene_change:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Scene change smoothed "
+                              f"(raw: {max_diff_raw:.1f} → smooth: {max_diff_smooth:.1f}, alpha: {alpha})")
+                    else:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ✓ EMA smoothed "
+                              f"(diff: {max_diff_smooth:.1f}, alpha: {alpha})")
+
+                matrix = H_candidate
 
             # Update previous matrix for next frame comparison
             self.H_previous = matrix.copy()
