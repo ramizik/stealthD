@@ -6,16 +6,17 @@ using YOLO pose estimation models and geometric calculations.
 
 import sys
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict
-import numpy as np
+from typing import Dict, List, Optional, Tuple
+
 import cv2
+import numpy as np
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-from ultralytics import YOLO
 import supervision as sv
 import torch
+from ultralytics import YOLO
 
 # ================================================
 # Core Detection Functions
@@ -33,7 +34,7 @@ def load_keypoint_model(model_path: str) -> YOLO:
     Raises:
         RuntimeError: If GPU is required but not available
     """
-    from constants import REQUIRE_GPU, GPU_DEVICE
+    from constants import GPU_DEVICE, REQUIRE_GPU
 
     # Check GPU availability
     if REQUIRE_GPU and not torch.cuda.is_available():
@@ -96,8 +97,18 @@ def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv
 
     # Extract keypoints if available
     keypoints = None
+    num_players = 0
+    avg_conf = 0.0
     if hasattr(results, 'keypoints') and results.keypoints is not None:
         keypoints = results.keypoints.data.cpu().numpy()  # Shape: (N, 27, 3)
+        num_players = keypoints.shape[0]
+        if num_players > 0:
+            # Compute average confidence across all keypoints for all players
+            avg_conf = float(np.mean(keypoints[:, :, 2]))
+    # Logging for diagnostics
+    print(f"[Keypoint Detection] Frame: Detected {num_players} players, avg keypoint confidence: {avg_conf:.3f}")
+    if num_players == 0:
+        print(f"[Keypoint Detection] WARNING: No players detected in this frame.")
 
     return detections, keypoints
 
