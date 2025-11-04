@@ -62,21 +62,17 @@ class AdaptiveHomographyMapper:
         self.temporal_fallback_count = 0
         self.proportional_fallback_count = 0
 
-    def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray],
-                       field_line_keypoints: List[Tuple[float, float]],
-                       field_line_confidence: float):
+    def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray]):
         """
         Add detected keypoints for a frame.
 
         Args:
             frame_idx: Frame index
             yolo_keypoints: YOLO pose keypoints (29, 3) or None
-            field_line_keypoints: Field line intersection points
-            field_line_confidence: Confidence from field line detection
         """
         self.total_frames_processed += 1
 
-        # Combine YOLO and field line keypoints
+        # Collect YOLO keypoints
         combined_keypoints = []
 
         # Add YOLO keypoints if available
@@ -90,13 +86,6 @@ class AdaptiveHomographyMapper:
                     if pitch_idx is not None and pitch_idx < len(self.all_pitch_points):
                         pitch_point = self.all_pitch_points[pitch_idx]
                         combined_keypoints.append((x, y, pitch_point[0], pitch_point[1], conf))
-
-        # Add field line keypoints (these are more reliable for tactical views)
-        # Map field line intersections to nearest pitch reference points
-        for pixel_point in field_line_keypoints:
-            # For now, use high confidence for field line detections
-            # TODO: Implement proper mapping from pixel intersections to pitch points
-            combined_keypoints.append((pixel_point[0], pixel_point[1], 0, 0, field_line_confidence))
 
         # Store keypoints
         self.frame_keypoints[frame_idx] = combined_keypoints

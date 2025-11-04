@@ -629,20 +629,15 @@ class CompleteSoccerAnalysisPipeline:
                                        mininterval=2.0, miniters=update_interval,
                                        ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
 
-            # Detect keypoints and objects with field line detection
+            # Detect keypoints and objects
             keypoints, metadata = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
             # Filter ball detections using tracker (removes anomalies)
             ball_detections = self.ball_tracker.update(ball_detections)
 
-            # Add frame data to adaptive mapper (YOLO keypoints + field line keypoints)
-            adaptive_mapper.add_frame_data(
-                i,
-                keypoints,
-                metadata.get('field_line_keypoints', []),
-                metadata.get('field_line_confidence', 0.0)
-            )
+            # Add frame data to adaptive mapper (YOLO keypoints only)
+            adaptive_mapper.add_frame_data(i, keypoints)
 
             # Update with tracking
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)

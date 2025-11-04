@@ -19,7 +19,6 @@ from keypoint_detection import (CONFIDENCE_THRESHOLD, KEYPOINT_CONNECTIONS,
                                 extract_field_corners,
                                 filter_visible_keypoints,
                                 get_keypoint_detections, load_keypoint_model)
-from keypoint_detection.field_line_detector import FieldLineDetector
 from pipelines.processing_pipeline import ProcessingPipeline
 from player_annotations import AnnotatorManager
 
@@ -35,7 +34,6 @@ class KeypointPipeline:
         """
         self.model_path = model_path
         self.model = None
-        self.field_line_detector = FieldLineDetector()
         self.annotator_manager = AnnotatorManager()
         self.processing_pipeline = ProcessingPipeline()
 
@@ -57,21 +55,14 @@ class KeypointPipeline:
 
         Returns:
             Tuple of (keypoints, metadata) where keypoints has shape (N, 29, 3)
-            and metadata contains detection information and field line features
+            and metadata contains detection information
         """
         if self.model is None:
             self.initialize_model()
 
         detections, keypoints = get_keypoint_detections(self.model, frame)
 
-        # Detect field lines for enhanced homography
-        field_features = self.field_line_detector.detect_field_features(frame)
-
-        metadata = {
-            'field_line_keypoints': field_features['keypoints'],
-            'field_line_confidence': field_features['confidence'],
-            'num_lines': len(field_features['lines']) if field_features['lines'] is not None else 0
-        }
+        metadata = {}
 
         # Calculate Metadata - Extract field corners and calculate dimensions
         if get_metadata:
