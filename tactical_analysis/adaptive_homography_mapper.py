@@ -98,10 +98,12 @@ class AdaptiveHomographyMapper:
             success = self._build_frame_homography(frame_idx, combined_keypoints)
             if success:
                 self.homography_success_count += 1
-                # No logging for successful homography builds - too verbose
+                # Log first 5 successes to verify it's working
+                if self.homography_success_count <= 5:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built homography from {len(combined_keypoints)} keypoints")
         else:
-            # Only log first 5 failures to avoid spam
-            if self.total_frames_processed <= 5:
+            # Log first 5 failures AND sample every 100 frames to see pattern
+            if self.total_frames_processed <= 5 or frame_idx % 100 == 0:
                 print(f"[Adaptive Homography] Frame {frame_idx}: Insufficient keypoints "
                       f"({len(combined_keypoints)}/{self.min_keypoints})")
 
@@ -192,31 +194,17 @@ class AdaptiveHomographyMapper:
             inliers = np.sum(mask) if mask is not None else 0
             confidence = inliers / len(keypoints) if len(keypoints) > 0 else 0.0
 
-            # DEBUG: Test transformation quality by checking a known point
-            # Transform center of image and verify it's within field bounds
-            test_point = np.array([[[960.0, 540.0]]], dtype=np.float32)  # Center of 1920x1080
-            try:
-                test_result = cv2.perspectiveTransform(test_point, matrix)
-                test_x, test_y = test_result[0][0]
-
-                # Convert from pitch units (12000x7000) to meters (105x68)
-                test_x_m = test_x * (105.0 / 12000.0)
-                test_y_m = test_y * (68.0 / 7000.0)
-
-                # Check if result is wildly out of bounds (sanity check)
-                if test_x_m < -50 or test_x_m > 155 or test_y_m < -50 or test_y_m > 118:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Bad transformation "
-                          f"(center -> ({test_x_m:.1f}, {test_y_m:.1f})m, inliers: {inliers}/{len(keypoints)})")
-                    return False
-            except:
-                print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Transform test failed")
-                return False
-
-            # Store if confidence is reasonable
+            # Store if confidence is reasonable (at least 30% inliers)
             if confidence > 0.3:
                 self.frame_homographies[frame_idx] = matrix
                 self.frame_confidences[frame_idx] = float(confidence)
                 return True
+            else:
+                # Log low confidence rejections (first 3 only)
+                if frame_idx < 3:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: REJECTED - Low confidence "
+                          f"({confidence:.2f}, inliers: {inliers}/{len(keypoints)})")
+                return False
 
         except Exception as e:
             print(f"[Adaptive Homography] Frame {frame_idx}: Homography failed - {e}")
