@@ -595,6 +595,69 @@ class CompleteSoccerAnalysisPipeline:
 
         return all_tracks, global_mapper
 
+    def _visualize_keypoints(self, frame: np.ndarray, keypoints: np.ndarray,
+                            frame_idx: int, output_dir: Path):
+        """Visualize detected keypoints on a frame and save debug image.
+
+        Args:
+            frame: Frame to annotate
+            keypoints: Detected keypoints (N, 32, 3) array
+            frame_idx: Frame index
+            output_dir: Directory to save visualization
+        """
+        from keypoint_detection.keypoint_constants import (
+            KEYPOINT_CONNECTIONS, KEYPOINT_NAMES)
+
+        if keypoints.shape[0] == 0:
+            return
+
+        # Get first detection
+        kpts = keypoints[0]  # (32, 3)
+
+        # Count visible keypoints
+        visible_count = (kpts[:, 2] > 0.5).sum()
+        avg_conf = kpts[:, 2].mean()
+
+        # Draw keypoints
+        for i, (x, y, conf) in enumerate(kpts):
+            if conf > 0.5:
+                # Draw circle
+                color = (0, 255, 0) if conf > 0.7 else (0, 165, 255)  # Green if high conf, orange otherwise
+                cv2.circle(frame, (int(x), int(y)), 6, color, -1)
+                cv2.circle(frame, (int(x), int(y)), 8, (255, 255, 255), 2)
+
+                # Draw keypoint ID
+                cv2.putText(frame, str(i), (int(x) + 12, int(y) - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(frame, str(i), (int(x) + 12, int(y) - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Draw connections
+        for conn in KEYPOINT_CONNECTIONS:
+            pt1_idx, pt2_idx = conn
+            if pt1_idx < len(kpts) and pt2_idx < len(kpts):
+                x1, y1, conf1 = kpts[pt1_idx]
+                x2, y2, conf2 = kpts[pt2_idx]
+
+                if conf1 > 0.5 and conf2 > 0.5:
+                    cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)),
+                            (255, 255, 0), 2)  # Cyan lines
+
+        # Add info overlay
+        info_bg = np.zeros((80, frame.shape[1], 3), dtype=np.uint8)
+        info_bg[:] = (0, 0, 0)
+        cv2.putText(info_bg, f"Frame {frame_idx} | Keypoints: {visible_count}/32 | Avg Conf: {avg_conf:.2f}",
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(info_bg, f"Green=High Conf (>0.7) | Orange=Medium Conf (0.5-0.7)",
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+        # Combine frame and info
+        annotated = np.vstack([info_bg, frame])
+
+        # Save
+        output_path = output_dir / f"frame_{frame_idx:06d}_keypoints.jpg"
+        cv2.imwrite(str(output_path), annotated)
+
     def _process_frames_streaming(self, video_path, total_frames, cache_path, frame_count):
         """Process frames using streaming (generator) to avoid loading all into RAM.
 
@@ -616,6 +679,13 @@ class CompleteSoccerAnalysisPipeline:
 
         print(f"  [Adaptive Homography] Processing {total_frames} frames with per-frame homography...")
 
+        # Setup keypoint visualization directory
+        output_dir = Path("output_videos") / "keypoint_debug"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Frames to visualize (sample evenly across video)
+        viz_frames = set([0, total_frames // 4, total_frames // 2, 3 * total_frames // 4, total_frames - 1])
+
         # Use supervision's frame generator (does NOT load all frames into memory)
         frame_generator = sv.get_video_frames_generator(
             video_path,
@@ -632,6 +702,10 @@ class CompleteSoccerAnalysisPipeline:
             # Detect keypoints and objects
             keypoints, metadata = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+
+            # Visualize keypoints on sample frames
+            if i in viz_frames and keypoints is not None and keypoints.size > 0:
+                self._visualize_keypoints(frame.copy(), keypoints, i, output_dir)
 
             # Filter ball detections using tracker (removes anomalies)
             ball_detections = self.ball_tracker.update(ball_detections)
@@ -659,6 +733,11 @@ class CompleteSoccerAnalysisPipeline:
         # Print statistics
         print(f"\n  [Step 4.5/8] Adaptive homography processing complete")
         adaptive_mapper.print_statistics()
+
+        # Print keypoint visualization info
+        print(f"\n  📊 Keypoint Debug Visualizations:")
+        print(f"     Saved {len(viz_frames)} sample frames to: {output_dir}")
+        print(f"     Check visualizations to verify pitch detection accuracy")
 
         # Save cache (version 3 uses adaptive mapper)
         print(f"\n  Saving frame processing cache to: {cache_path.name}")
@@ -861,4 +940,4 @@ if __name__ == "__main__":
     print(f"\nAnalysis finished!")
     print(f"Output video: {output_video}")
     print(f"Analysis data (JSON): {json_output}")
-    print(f"LLM-ready data (JSON): {llm_json_output}")
+    print(f"LLM-ready data (JSON): {llm_json_output}")    print(f"LLM-ready data (JSON): {llm_json_output}")    print(f"LLM-ready data (JSON): {llm_json_output}")
