@@ -110,6 +110,7 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         slicer = sv.InferenceSlicer(
             callback=inference_callback,
             slice_wh=(w // 2 + 100, h // 2 + 100),  # Tile size (slightly larger than half frame)
+            overlap_ratio_wh=None,  # Explicitly disable deprecated parameter
             overlap_wh=(100, 100),  # 100px overlap between tiles
             iou_threshold=0.1,  # Low threshold for ball (small object)
             overlap_filter=sv.OverlapFilter.NON_MAX_SUPPRESSION  # Remove duplicate detections
