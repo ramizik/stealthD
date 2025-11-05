@@ -103,6 +103,35 @@ class CompleteSoccerAnalysisPipeline:
         cache_dir = video_path_obj.parent / "cache"
         cache_dir.mkdir(exist_ok=True)  # Create cache directory if it doesn't exist
 
+        # Step 3.5: Detect camera shot boundaries EARLY (before frame processing)
+        print("\n[Step 3.5/8] Detecting camera shot boundaries...")
+        from camera_analysis import ShotDetector
+
+        shot_stub_path = str(cache_dir / f"{video_path_obj.stem}_shot_boundaries.pkl")
+
+        shot_boundaries = None
+        shot_segments = None
+
+        try:
+            shot_detector = ShotDetector(threshold=30.0, min_scene_len=15)
+            shot_boundaries = shot_detector.detect_shots(
+                str(video_path),
+                read_from_stub=True,
+                stub_path=shot_stub_path,
+                downscale_factor=2  # Faster processing
+            )
+
+            # Get shot segments for potential use
+            shot_segments = shot_detector.get_shot_segments(shot_boundaries, total_frames)
+            print(f"  Shot detection complete: {len(shot_boundaries)} shots, {len(shot_segments)} segments")
+
+        except ImportError as e:
+            print(f"  PySceneDetect not available - skipping shot detection")
+            print(f"  Install with: pip install scenedetect[opencv]")
+        except Exception as e:
+            print(f"  Error during shot detection: {e}")
+            print(f"  Continuing without shot boundary information")
+
         # Check for cached frame processing data
         cache_path = cache_dir / f"{video_path_obj.stem}_frame_cache.pkl"
 
@@ -131,16 +160,21 @@ class CompleteSoccerAnalysisPipeline:
                     else:
                         print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {total_frames}, "
                               f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
-                    all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+                    all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
             except Exception as e:
                 print(f"  Error loading cache: {e} - reprocessing...")
-                all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+                all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
         else:
-            all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count)
+            all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
 
         # Clear memory after frame processing
         self._clear_memory()
         self._print_memory_status("After Frame Processing")
+
+        # Store shot boundaries in tracks for JSON output
+        if shot_boundaries is not None:
+            all_tracks['shot_boundaries'] = shot_boundaries
+            all_tracks['shot_segments'] = shot_segments
 
         # Step 5: Ball track interpolation
         print("\n[Step 5/8] Interpolating ball tracks...")
@@ -187,7 +221,7 @@ class CompleteSoccerAnalysisPipeline:
 
         print(f"  Camera movement estimated (will apply compensation after speed calculation)")
 
-        # Step 5.1: Stitch fragmented tracks (re-identification)
+        # Step 5.1: Stitching fragmented tracks (re-identification)
         print("\n[Step 5.1/8] Stitching fragmented player tracks...")
         from player_tracking import TrackStitcher
 
@@ -210,12 +244,40 @@ class CompleteSoccerAnalysisPipeline:
         from player_tracking import PlayerIDMapper
 
         id_mapper = PlayerIDMapper()
-        id_mapper.analyze_tracks(all_tracks['player'], all_tracks['player_classids'])
+        # Pass goalkeeper metadata to ID mapper so goalkeepers are prioritized
+        goalkeeper_metadata = all_tracks.get('player_is_goalkeeper', None)
+        id_mapper.analyze_tracks(all_tracks['player'], all_tracks['player_classids'], goalkeeper_metadata)
 
         # Remap all tracks to use fixed IDs
         all_tracks['player'] = id_mapper.map_player_tracks(all_tracks['player'])
         all_tracks['player_classids'] = id_mapper.map_team_assignments(all_tracks['player_classids'])
         all_tracks['referee'] = id_mapper.map_referee_tracks(all_tracks['referee'])
+
+        # Remap goalkeeper metadata to use fixed IDs and propagate to all frames
+        if 'player_is_goalkeeper' in all_tracks:
+            # First, identify which fixed IDs are goalkeepers
+            goalkeeper_fixed_ids = set()
+            for frame_idx, frame_goalkeepers in all_tracks['player_is_goalkeeper'].items():
+                for old_id, is_gk in frame_goalkeepers.items():
+                    if is_gk:
+                        # Map old ByteTrack ID to new fixed ID
+                        new_id = id_mapper.bytetrack_to_fixed.get(old_id, old_id)
+                        goalkeeper_fixed_ids.add(new_id)
+
+            # Print goalkeeper ID mapping
+            if goalkeeper_fixed_ids:
+                print(f"\n[GK ID MAPPING DEBUG] Goalkeeper fixed IDs: {sorted(goalkeeper_fixed_ids)}")
+
+            # Now propagate goalkeeper status to ALL frames where these players appear
+            remapped_goalkeeper = {}
+            for frame_idx, frame_players in all_tracks['player'].items():
+                remapped_goalkeeper[frame_idx] = {}
+                for player_id in frame_players.keys():
+                    # Mark as goalkeeper if this player ID is a goalkeeper
+                    remapped_goalkeeper[frame_idx][player_id] = (player_id in goalkeeper_fixed_ids)
+
+            all_tracks['player_is_goalkeeper'] = remapped_goalkeeper
+            print(f"[GK DEBUG] Goalkeeper status propagated to all {len(remapped_goalkeeper)} frames")
 
         # Store mapping info for JSON output
         id_mapping_info = id_mapper.get_mapping_summary()
@@ -560,7 +622,7 @@ class CompleteSoccerAnalysisPipeline:
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
 
             # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
+            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections, frame_idx=i)
 
             # Store tracks for interpolation
             all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
@@ -659,7 +721,7 @@ class CompleteSoccerAnalysisPipeline:
         output_path = output_dir / f"frame_{frame_idx:06d}_keypoints.jpg"
         cv2.imwrite(str(output_path), annotated)
 
-    def _process_frames_streaming(self, video_path, total_frames, cache_path, frame_count):
+    def _process_frames_streaming(self, video_path, total_frames, cache_path, frame_count, shot_boundaries=None):
         """Process frames using streaming (generator) to avoid loading all into RAM.
 
         Args:
@@ -667,6 +729,7 @@ class CompleteSoccerAnalysisPipeline:
             total_frames: Total number of frames to process
             cache_path: Path to save cache file
             frame_count: Frame count limit (-1 for all)
+            shot_boundaries: Optional list of frame indices where camera shots change
 
         Returns:
             Tuple of (all_tracks, adaptive_mapper)
@@ -677,6 +740,10 @@ class CompleteSoccerAnalysisPipeline:
         from tactical_analysis.adaptive_homography_mapper import \
             AdaptiveHomographyMapper
         adaptive_mapper = AdaptiveHomographyMapper()
+
+        # Set shot boundaries if provided (for scene-aware homography)
+        if shot_boundaries is not None and len(shot_boundaries) > 0:
+            adaptive_mapper.set_shot_boundaries(shot_boundaries)
 
         print(f"  [Adaptive Homography] Processing {total_frames} frames with per-frame homography...")
 
@@ -718,7 +785,7 @@ class CompleteSoccerAnalysisPipeline:
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
 
             # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
+            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections, frame_idx=i)
 
             # Store tracks for interpolation
             all_tracks = self.tracking_pipeline.convert_detection_to_tracks(
@@ -947,6 +1014,3 @@ if __name__ == "__main__":
         print(f"Output video: {output_video}")
         print(f"Analysis data: {json_output}")
         print(f"LLM-formatted data: {llm_json_output}")
-    print(f"Output video: {output_video}")
-    print(f"Analysis data (JSON): {json_output}")
-    print(f"LLM-ready data (JSON): {llm_json_output}")

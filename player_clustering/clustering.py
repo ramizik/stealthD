@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -90,10 +91,74 @@ class ClusteringManager:
         return cluster_labels, self.reducer, self.cluster_model
 
 
+    def fit(self, crops):
+        """
+        Fit clustering models on training crops (sklearn-style API).
+        OPTIMIZED: Uses fast color features instead of slow SigLIP embeddings.
+
+        Args:
+            crops: List of player crop images (PIL format)
+
+        Returns:
+            self for method chaining
+        """
+        if crops is None or len(crops) == 0:
+            raise ValueError("Crops list cannot be None or empty")
+
+        print(f"Extracting fast color features from {len(crops)} training crops...")
+
+        # Extract FAST color features from crops (compatible with inference)
+        fast_features = self.fast_feature_extractor.get_features_from_crops(crops)
+
+        print(f"Training UMAP + K-means on {len(fast_features)} samples...")
+
+        # Project to lower-dimensional space using UMAP
+        reduced_features = self.reducer.fit_transform(fast_features)
+
+        # Cluster using K-means
+        self.cluster_model.fit(reduced_features)
+
+        # Mark as trained
+        self.is_trained = True
+
+        print(f"Training complete. Clusters: {self.cluster_model.n_clusters}, Feature dim: {fast_features.shape[1]}")
+
+        return self
+
+    def predict(self, crops):
+        """
+        Predict team assignments for new crops (sklearn-style API).
+        FAST VERSION: Uses color histograms instead of slow SigLIP embeddings.
+
+        Args:
+            crops: List of player crop images (PIL format)
+
+        Returns:
+            Cluster labels for the players
+        """
+        if not self.is_trained:
+            raise RuntimeError("Models must be trained before prediction. Call fit() first.")
+
+        if crops is None or len(crops) == 0:
+            return np.array([])
+
+        # Extract FAST color features
+        fast_features = self.fast_feature_extractor.get_features_from_crops(crops)
+
+        # Project features using trained UMAP
+        reduced_features = self.reducer.transform(fast_features)
+
+        # Predict clusters using trained K-means
+        cluster_labels = self.cluster_model.predict(reduced_features)
+
+        return cluster_labels
+
     def train_clustering_models(self, crops):
         """
         Train the UMAP and K-means models on player crops.
         OPTIMIZED: Uses fast color features instead of slow SigLIP embeddings.
+
+        DEPRECATED: Use fit() instead for sklearn-style API.
 
         Args:
             crops: List of player crop images (PIL format)

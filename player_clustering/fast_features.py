@@ -3,8 +3,8 @@ Fast feature extraction for team assignment during inference.
 Uses color histograms instead of slow SigLIP embeddings.
 """
 
-import numpy as np
 import cv2
+import numpy as np
 import supervision as sv
 from PIL import Image
 
@@ -15,15 +15,17 @@ class FastFeatureExtractor:
     Much faster than SigLIP embeddings (< 1ms vs 2600ms per player).
     """
 
-    def __init__(self, bins=(8, 8, 8)):
+    def __init__(self, bins=(8, 8, 8), torso_only=True):
         """
         Initialize fast feature extractor.
 
         Args:
             bins: Number of bins for each color channel (H, S, V)
+            torso_only: If True, crop only upper 50% of player bbox (jersey focus)
         """
         self.bins = bins
         self.feature_dim = bins[0] + bins[1] + bins[2]  # Concatenated histogram
+        self.torso_only = torso_only
 
     def extract_color_histogram(self, image):
         """
@@ -72,6 +74,11 @@ class FastFeatureExtractor:
             # Crop player region
             cropped = sv.crop_image(frame, bbox)
 
+            # Apply torso-only cropping to focus on jersey colors
+            if self.torso_only:
+                height = cropped.shape[0]
+                cropped = cropped[0:int(height/2), :]  # Upper 50% only
+
             # Extract color histogram
             feature = self.extract_color_histogram(cropped)
             features.append(feature)
@@ -108,6 +115,11 @@ class FastFeatureExtractor:
             else:
                 # Already numpy array
                 img_bgr = crop
+
+            # Apply torso-only cropping to focus on jersey colors
+            if self.torso_only:
+                height = img_bgr.shape[0]
+                img_bgr = img_bgr[0:int(height/2), :]  # Upper 50% only
 
             # Extract color histogram
             feature = self.extract_color_histogram(img_bgr)

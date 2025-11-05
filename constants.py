@@ -48,7 +48,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video path
 # UPDATE THIS: Point to your actual test video file
-test_video = PROJECT_DIR / r"input_videos\sample_6.mp4"
+test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
 
 # Alternative video paths (examples)
 # test_video = PROJECT_DIR / "test_videos/sample.mp4"
@@ -74,6 +74,14 @@ N_TEAMS = 2                       # Number of teams to cluster (usually 2)
 # Tracking parameters
 TRACKER_MATCH_THRESH = 0.5        # ByteTrack matching threshold
 TRACKER_BUFFER_SIZE = 120         # Number of frames to keep in tracking buffer
+
+# Detection quality filtering (SoccerNet-style)
+# NOTE: Relaxed from original SoccerNet values (10, 1.6) to avoid filtering legitimate players
+MIN_BOX_AREA = 100                # Minimum bounding box area (px²) to keep detection (was 10)
+ASPECT_RATIO_THRESH = 3.0         # Maximum aspect ratio (h/w) - filters vertical false positives (was 1.6)
+
+# Detection parameters
+DETECTION_CONFIDENCE = 0.1        # Lower threshold to detect distant goalkeepers (default YOLO: 0.25)
 
 # Ball interpolation
 BALL_INTERPOLATION_LIMIT = 30     # Max frames to interpolate missing ball detections

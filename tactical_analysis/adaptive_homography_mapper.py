@@ -3,10 +3,13 @@
 Builds per-frame homographies with intelligent fallbacks for tactical
 camera recordings with panning/zooming motion.
 
-STABILITY ENHANCEMENTS:
+STABILITY ENHANCEMENTS (SoccerNet Best Practices):
+- Normalization transform for numerical stability (SoccerNet baseline)
+- PnP refinement with Levenberg-Marquardt optimization
 - Temporal homography smoothing (EMA) to prevent matrix instability
 - Position validation with bounds checking
 - Per-player position smoothing to reduce jitter
+- Homography validation before use
 """
 
 import sys
@@ -21,6 +24,8 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from tactical_analysis.calibration_utils import (
+    estimate_homography_normalized, refine_homography_pnp, validate_homography)
 from tactical_analysis.sports_compat import SoccerPitchConfiguration
 
 
@@ -85,6 +90,25 @@ class AdaptiveHomographyMapper:
         self.temporal_fallback_count = 0
         self.proportional_fallback_count = 0
         self.matrix_rejected_count = 0  # New: Count unstable matrices rejected
+
+        # SHOT BOUNDARIES (for scene change detection)
+        self.shot_boundaries = []  # List of frame indices where camera shots change
+        self.shot_boundary_set = set()  # Set for fast lookup
+
+    def set_shot_boundaries(self, shot_boundaries: List[int]):
+        """
+        Set camera shot boundaries for improved homography stability.
+
+        When a shot boundary is detected (camera cut/transition), the homography
+        smoothing is reset to avoid carrying over incorrect transformation matrices
+        from the previous camera angle.
+
+        Args:
+            shot_boundaries: List of frame indices where camera shots change
+        """
+        self.shot_boundaries = shot_boundaries
+        self.shot_boundary_set = set(shot_boundaries)
+        print(f"[Adaptive Homography] Set {len(shot_boundaries)} shot boundaries for scene-aware processing")
 
     def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray]):
         """
@@ -187,12 +211,15 @@ class AdaptiveHomographyMapper:
 
     def _build_frame_homography(self, frame_idx: int, keypoints: List[Tuple]) -> bool:
         """
-        Build homography matrix for a single frame WITH TEMPORAL SMOOTHING.
+        Build homography matrix for a single frame WITH SOCCERNET ENHANCEMENTS.
 
-        Implements stability improvements:
-        1. Matrix change validation (reject extreme changes)
-        2. Exponential moving average (EMA) smoothing
-        3. Fallback to previous stable matrix if new one is unstable
+        Implements SoccerNet best practices + stability improvements:
+        1. Normalization transform for numerical stability (SoccerNet baseline)
+        2. Homography validation before use
+        3. Optional PnP refinement for accuracy
+        4. Matrix change validation (reject extreme changes)
+        5. Exponential moving average (EMA) smoothing
+        6. Fallback to previous stable matrix if new one is unstable
 
         Args:
             frame_idx: Frame index
@@ -216,17 +243,45 @@ class AdaptiveHomographyMapper:
         pitch_points = np.array(pitch_points, dtype=np.float32)
 
         try:
-            # MATCH RESEARCH CODE: Use DEFAULT cv2.findHomography (NO RANSAC)
-            # Research: self.m, _ = cv2.findHomography(source, target)
-            # They do NOT use RANSAC - just trust the spatially filtered keypoints
-            H_raw, _ = cv2.findHomography(pixel_points, pitch_points)
+            # SOCCERNET ENHANCEMENT: Use normalized homography estimation
+            # Dramatically improves numerical stability
+            H_raw, mask = estimate_homography_normalized(
+                pixel_points,
+                pitch_points,
+                method=0  # No RANSAC - trust spatially filtered keypoints
+            )
 
-            if H_raw is None:
+            # Validate homography
+            if H_raw is None or not validate_homography(H_raw):
                 if frame_idx < 5:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: Homography calculation failed")
+                    print(f"[Adaptive Homography] Frame {frame_idx}: Invalid homography")
                 return False
 
+            # SOCCERNET ENHANCEMENT: Optional PnP refinement for better accuracy
+            # Only refine if we have good keypoint coverage
+            if len(keypoints) >= 8:  # Need reasonable number for refinement
+                pitch_3d = np.c_[pitch_points, np.zeros(len(pitch_points))]
+                H_refined = refine_homography_pnp(
+                    H_raw,
+                    pixel_points,
+                    pitch_3d,
+                    image_size=(1920, 1080),
+                    max_iterations=20000
+                )
+                if H_refined is not None and validate_homography(H_refined):
+                    H_raw = H_refined
+
             num_keypoints = len(keypoints)
+
+            # CHECK FOR SHOT BOUNDARY: Reset smoothing if this is a new camera shot
+            is_shot_boundary = frame_idx in self.shot_boundary_set
+            if is_shot_boundary:
+                # Reset temporal smoothing at shot boundaries
+                self.H_previous = None
+                self.H_smooth = None
+                self.H_buffer.clear()
+                if frame_idx < 10 or frame_idx % 50 == 0:  # Log some boundaries
+                    print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Shot boundary detected - resetting temporal smoothing")
 
             # STEP 1: Add to buffer for MEDIAN FILTERING (like BallTracker)
             self.H_buffer.append(H_raw)
@@ -247,7 +302,7 @@ class AdaptiveHomographyMapper:
                 confidence = 1.0
 
                 if frame_idx < 3:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built initial homography from {num_keypoints} keypoints")
+                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built initial homography from {num_keypoints} keypoints (SoccerNet enhanced)")
             else:
                 # Calculate difference from previous frame (using median-filtered matrix)
                 max_diff_raw = np.abs(H_median - self.H_previous).max()

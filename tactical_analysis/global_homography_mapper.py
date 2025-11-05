@@ -3,6 +3,12 @@ Global Homography Mapper for Soccer Field Tracking.
 
 Accumulates keypoints from all video frames to build a single, robust homography
 transformation. Provides confidence scores for field regions based on keypoint coverage.
+
+ENHANCED with SoccerNet Calibration Best Practices:
+- Normalization transform for numerical stability
+- PnP refinement with Levenberg-Marquardt optimization
+- RANSAC outlier rejection
+- Homography validation
 """
 
 import sys
@@ -17,6 +23,8 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from tactical_analysis.calibration_utils import (
+    estimate_homography_normalized, refine_homography_pnp, validate_homography)
 from tactical_analysis.sports_compat import (SoccerPitchConfiguration,
                                              ViewTransformer)
 
@@ -186,12 +194,17 @@ class GlobalHomographyMapper:
     def build_global_homography(self) -> bool:
         """
         Build global homography matrix from all accumulated keypoints.
-        Uses RANSAC for robustness against outliers.
+
+        ENHANCED with SoccerNet Best Practices:
+        1. Normalization transform for numerical stability
+        2. RANSAC for outlier rejection
+        3. PnP refinement with Levenberg-Marquardt optimization
+        4. Homography validation
 
         Returns:
             True if successful, False if insufficient data
         """
-        print(f"\n[Global Homography] Building from {self.total_keypoints_accumulated} keypoint observations...")
+        print(f"\n[Global Homography] Building from {self.total_keypoints_accumulated} keypoint observations... (SoccerNet enhanced)")
 
         # Check if we have enough data
         if len(self.keypoint_observations) < 4:
@@ -216,29 +229,62 @@ class GlobalHomographyMapper:
         print(f"[Global Homography] Unique keypoints: {len(self.keypoint_observations)}")
         print(f"[Global Homography] Frames with keypoints: {self.frames_with_keypoints}/{self.total_frames_processed}")
 
-        # Build homography using RANSAC
+        # SOCCERNET ENHANCEMENT: Build homography with normalization
         try:
-            self.global_matrix, mask = cv2.findHomography(
+            print("[Global Homography] Using normalized estimation with RANSAC...")
+            self.global_matrix, mask = estimate_homography_normalized(
                 all_pixel_points,
                 all_pitch_points,
-                cv2.RANSAC,
-                5.0  # RANSAC threshold
+                method=cv2.RANSAC,
+                ransac_threshold=5.0
             )
 
-            if self.global_matrix is None:
-                print("[Global Homography] ERROR: Failed to compute homography matrix")
+            # Validate homography
+            if self.global_matrix is None or not validate_homography(self.global_matrix):
+                print("[Global Homography] ERROR: Invalid homography matrix")
                 return False
 
             # Calculate inlier ratio
-            inliers = np.sum(mask) if mask is not None else 0
+            inliers = np.sum(mask) if mask is not None and len(mask) > 0 else 0
             inlier_ratio = inliers / len(all_pixel_points) if len(all_pixel_points) > 0 else 0
             print(f"[Global Homography] Inliers: {inliers}/{len(all_pixel_points)} ({100*inlier_ratio:.1f}%)")
+
+            # SOCCERNET ENHANCEMENT: PnP refinement for improved accuracy
+            if inliers >= 8:  # Need sufficient inliers for refinement
+                print("[Global Homography] Applying PnP refinement (Levenberg-Marquardt)...")
+
+                # Use only inlier points for refinement
+                if mask is not None and len(mask) > 0:
+                    inlier_mask = mask.flatten().astype(bool)
+                    pixel_inliers = all_pixel_points[inlier_mask]
+                    pitch_inliers = all_pitch_points[inlier_mask]
+                else:
+                    pixel_inliers = all_pixel_points
+                    pitch_inliers = all_pitch_points
+
+                # Add Z=0 for 3D pitch coordinates (planar assumption)
+                pitch_3d = np.c_[pitch_inliers, np.zeros(len(pitch_inliers))]
+
+                H_refined = refine_homography_pnp(
+                    self.global_matrix,
+                    pixel_inliers,
+                    pitch_3d,
+                    image_size=(1920, 1080),
+                    max_iterations=20000
+                )
+
+                if H_refined is not None and validate_homography(H_refined):
+                    self.global_matrix = H_refined
+                    print("[Global Homography] ✓ PnP refinement successful")
+                else:
+                    print("[Global Homography] PnP refinement failed, using RANSAC result")
 
             self.matrix_built = True
 
             # Build confidence map
             self._build_confidence_map()
 
+            print("[Global Homography] ✓ Successfully built global homography with SoccerNet enhancements")
             return True
 
         except Exception as e:
@@ -453,7 +499,11 @@ class GlobalHomographyMapper:
         return center_pitch, 'emergency_center'
 
     def _build_per_frame_matrix(self, keypoints: Dict) -> Optional[np.ndarray]:
-        """Build homography matrix from this frame's keypoints."""
+        """
+        Build homography matrix from this frame's keypoints.
+
+        ENHANCED with SoccerNet normalization and validation.
+        """
         pixel_points = []
         pitch_points = []
 
@@ -474,8 +524,19 @@ class GlobalHomographyMapper:
         pixel_pts = np.array(pixel_points, dtype=np.float32)
         pitch_pts = np.array(pitch_points, dtype=np.float32)
 
-        matrix, _ = cv2.findHomography(pixel_pts, pitch_pts, cv2.RANSAC, 5.0)
-        return matrix
+        # SOCCERNET ENHANCEMENT: Use normalized estimation
+        matrix, mask = estimate_homography_normalized(
+            pixel_pts,
+            pitch_pts,
+            method=cv2.RANSAC,
+            ransac_threshold=5.0
+        )
+
+        # Validate before returning
+        if matrix is not None and validate_homography(matrix):
+            return matrix
+
+        return None
 
     def _get_temporal_average_matrix(self) -> Optional[np.ndarray]:
         """Average the last N homography matrices for temporal smoothing."""

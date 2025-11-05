@@ -68,19 +68,20 @@ def load_detection_model(model_path: str) -> YOLO:
     return model
 
 
-def detect_objects_in_frames(model: YOLO, frames) -> List:
+def detect_objects_in_frames(model: YOLO, frames, conf_threshold: float = 0.1) -> List:
     """Detect objects in video frames using YOLO model.
 
     Args:
         model: Loaded YOLO model
         frames: Video frames or single frame
+        conf_threshold: Confidence threshold for detections (default: 0.1 for better goalkeeper detection)
 
     Returns:
         Detection results from YOLO model
     """
-    return model(frames, verbose=False)
+    return model(frames, verbose=False, conf=conf_threshold)
 
-def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = True) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
+def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = True, ball_padding: int = 10, conf_threshold: float = 0.1) -> Tuple[sv.Detections, sv.Detections, sv.Detections]:
     """Get separated detections for players, ball, and referees.
 
     Uses InferenceSlicer for improved ball detection. Small objects like balls
@@ -92,13 +93,15 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
         detection_model: Loaded YOLO model
         frame: Input frame as numpy array
         use_slicer: Whether to use inference slicer (default: True for better ball detection)
+        ball_padding: Padding (in pixels) to add around ball detections for better tracking (default: 10)
+        conf_threshold: Confidence threshold for detections (default: 0.1 for better goalkeeper detection)
 
     Returns:
         Tuple of (player_detections, ball_detections, referee_detections)
     """
     def inference_callback(patch: np.ndarray) -> sv.Detections:
         """Convert YOLO results to supervision format."""
-        result = detect_objects_in_frames(detection_model, patch)[0]
+        result = detect_objects_in_frames(detection_model, patch, conf_threshold=conf_threshold)[0]
         return sv.Detections.from_ultralytics(result)
 
     # Get detections using slicer or direct inference
@@ -123,5 +126,9 @@ def get_detections(detection_model: YOLO, frame: np.ndarray, use_slicer: bool = 
     player_detections = detections[detections.class_id == 0]
     ball_detections = detections[detections.class_id == 1]
     referee_detections = detections[detections.class_id == 2]
+
+    # Add padding to ball bounding boxes for improved tracking stability
+    if len(ball_detections.xyxy) > 0 and ball_padding > 0:
+        ball_detections.xyxy = sv.pad_boxes(xyxy=ball_detections.xyxy, px=ball_padding)
 
     return player_detections, ball_detections, referee_detections
