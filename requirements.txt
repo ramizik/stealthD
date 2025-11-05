@@ -40,5 +40,8 @@ huggingface-hub>=0.16.0
 pyyaml>=5.3
 matplotlib>=3.6.0
 
+# Camera Analysis
+scenedetect[opencv]>=0.6.0  # For camera shot boundary detection
+
 # Optional: For better performance
 # numba>=0.50.0  # Uncomment if needed for numerical optimizations

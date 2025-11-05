@@ -8,12 +8,14 @@ Maps ByteTrack IDs to fixed player IDs:
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
-from typing import Dict, Tuple, Optional
 from collections import defaultdict
+from typing import Dict, Optional, Tuple
+
+import numpy as np
 
 
 class PlayerIDMapper:
@@ -31,6 +33,7 @@ class PlayerIDMapper:
         self.fixed_to_bytetrack: Dict[int, int] = {}  # {fixed_id: bytetrack_id} for reverse lookup
         self.team_assignments: Dict[int, int] = {}  # {bytetrack_id: team_id}
         self.track_statistics: Dict[int, Dict] = {}  # {bytetrack_id: {team_counts, frame_count, etc}}
+        self.goalkeeper_bytetrack_ids: set = set()  # ByteTrack IDs marked as goalkeepers
 
         # Fixed ID ranges
         self.TEAM_0_MIN = 1
@@ -43,15 +46,25 @@ class PlayerIDMapper:
         self.next_team0_id = 1
         self.next_team1_id = 12
 
-    def analyze_tracks(self, player_tracks: Dict, team_assignments: Dict):
+    def analyze_tracks(self, player_tracks: Dict, team_assignments: Dict, goalkeeper_metadata: Optional[Dict] = None):
         """
         Analyze all tracks to build ID mapping.
 
         Args:
             player_tracks: Dictionary {frame_idx: {bytetrack_id: bbox}}
             team_assignments: Dictionary {frame_idx: {bytetrack_id: team_id}}
+            goalkeeper_metadata: Optional dictionary {frame_idx: {bytetrack_id: is_goalkeeper}}
         """
         print("Analyzing tracks to build consistent ID mapping...")
+
+        # Extract goalkeeper ByteTrack IDs if provided
+        if goalkeeper_metadata:
+            for frame_idx, frame_goalkeepers in goalkeeper_metadata.items():
+                for bytetrack_id, is_gk in frame_goalkeepers.items():
+                    if is_gk:
+                        self.goalkeeper_bytetrack_ids.add(bytetrack_id)
+            if self.goalkeeper_bytetrack_ids:
+                print(f"  Found {len(self.goalkeeper_bytetrack_ids)} goalkeeper(s) in ByteTrack IDs: {sorted(self.goalkeeper_bytetrack_ids)}")
 
         # Collect statistics for each ByteTrack ID
         for frame_idx, frame_tracks in player_tracks.items():
@@ -93,11 +106,13 @@ class PlayerIDMapper:
 
         for bytetrack_id, team_id in self.team_assignments.items():
             stats = self.track_statistics[bytetrack_id]
+            is_goalkeeper = bytetrack_id in self.goalkeeper_bytetrack_ids
             track_info = {
                 'bytetrack_id': bytetrack_id,
                 'team': team_id,
                 'first_frame': stats['first_frame'],
-                'total_frames': stats['total_frames']
+                'total_frames': stats['total_frames'],
+                'is_goalkeeper': is_goalkeeper
             }
 
             if team_id == 0:
@@ -105,23 +120,23 @@ class PlayerIDMapper:
             else:
                 team1_tracks.append(track_info)
 
-        # Sort by total frames (descending) - most present players get fixed IDs
-        # This ensures the 11 most visible players per team get IDs 1-22
-        team0_tracks.sort(key=lambda x: (-x['total_frames'], x['first_frame']))
-        team1_tracks.sort(key=lambda x: (-x['total_frames'], x['first_frame']))
+        # Sort by goalkeeper status (GKs first), then total frames (descending)
+        # This ensures goalkeepers ALWAYS get mapped, followed by most visible players
+        team0_tracks.sort(key=lambda x: (-x['is_goalkeeper'], -x['total_frames'], x['first_frame']))
+        team1_tracks.sort(key=lambda x: (-x['is_goalkeeper'], -x['total_frames'], x['first_frame']))
 
-        # Assign fixed IDs for Team 0 (1-11) - top 11 most visible players
+        # Assign fixed IDs for Team 0 (1-11) - goalkeeper first, then top field players
         team0_mapped = 0
-        for i, track_info in enumerate(team0_tracks[:11]):  # Top 11 by frame presence
+        for i, track_info in enumerate(team0_tracks[:11]):  # Top 11 by priority (GK + presence)
             fixed_id = self.TEAM_0_MIN + i
             self.bytetrack_to_fixed[track_info['bytetrack_id']] = fixed_id
             self.fixed_to_bytetrack[fixed_id] = track_info['bytetrack_id']
             self.next_team0_id = max(self.next_team0_id, fixed_id + 1)
             team0_mapped += 1
 
-        # Assign fixed IDs for Team 1 (12-22) - top 11 most visible players
+        # Assign fixed IDs for Team 1 (12-22) - goalkeeper first, then top field players
         team1_mapped = 0
-        for i, track_info in enumerate(team1_tracks[:11]):  # Top 11 by frame presence
+        for i, track_info in enumerate(team1_tracks[:11]):  # Top 11 by priority (GK + presence)
             fixed_id = self.TEAM_1_MIN + i
             self.bytetrack_to_fixed[track_info['bytetrack_id']] = fixed_id
             self.fixed_to_bytetrack[fixed_id] = track_info['bytetrack_id']
@@ -132,6 +147,17 @@ class PlayerIDMapper:
         print(f"ID Mapping complete: {total_mapped} players mapped to fixed IDs 1-22")
         print(f"  Team 0: {team0_mapped} players (IDs 1-{team0_mapped})")
         print(f"  Team 1: {team1_mapped} players (IDs 12-{11 + team1_mapped})")
+
+        # Report goalkeeper mappings
+        if self.goalkeeper_bytetrack_ids:
+            gk_mappings = []
+            for bytetrack_id in self.goalkeeper_bytetrack_ids:
+                if bytetrack_id in self.bytetrack_to_fixed:
+                    fixed_id = self.bytetrack_to_fixed[bytetrack_id]
+                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→Fixed#{fixed_id}")
+                else:
+                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→UNMAPPED")
+            print(f"  Goalkeeper ID mappings: {', '.join(gk_mappings)}")
 
         # Report unmapped tracks (likely tracking artifacts or brief appearances)
         total_tracks = len(team0_tracks) + len(team1_tracks)

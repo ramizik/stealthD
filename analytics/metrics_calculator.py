@@ -7,17 +7,20 @@ to generate comprehensive match analytics.
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
+import gc
 from typing import Dict, Tuple
+
+import numpy as np
 import supervision as sv
 
-from .speed_calculator import SpeedCalculator
-from .possession_tracker import PossessionTracker
 from .pass_detector import PassDetector
 from .player_ball_assigner import PlayerBallAssigner
+from .possession_tracker import PossessionTracker
+from .speed_calculator import SpeedCalculator
 
 
 class MetricsCalculator:
@@ -56,15 +59,16 @@ class MetricsCalculator:
             max_ball_distance=2.0  # Reduced from 2.5m for more accurate touch detection
         )
 
-    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, view_transformers: Dict,
-                                         video_dimensions: Tuple[int, int]) -> Dict:
+    def _calculate_ball_field_coordinates(self, ball_tracks: Dict, adaptive_mapper,
+                                         video_dimensions: Tuple[int, int], camera_movement: list = None) -> Dict:
         """
-        Calculate field coordinates for ball positions.
+        Calculate field coordinates for ball positions using adaptive per-frame homography.
 
         Args:
             ball_tracks: Dictionary {frame_idx: [x1, y1, x2, y2]}
-            view_transformers: Dictionary {frame_idx: ViewTransformer or None}
+            adaptive_mapper: AdaptiveHomographyMapper object
             video_dimensions: (width, height) of video in pixels
+            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
             Dictionary {frame_idx: [x, y]} with ball field coordinates
@@ -78,30 +82,34 @@ class MetricsCalculator:
             # Get center of ball bounding box
             x_center = (bbox[0] + bbox[2]) / 2
             y_center = (bbox[1] + bbox[3]) / 2
-            ball_center = np.array([[x_center, y_center]])
+            ball_center = np.array([x_center, y_center])
 
-            # Get view transformer for this frame
-            view_transformer = view_transformers.get(frame_idx, None)
+            # Get camera motion for this frame if available
+            camera_motion = None
+            if camera_movement and frame_idx < len(camera_movement):
+                camera_motion = tuple(camera_movement[frame_idx])
 
-            # Convert to field coordinates
-            field_coord, _ = self.speed_calculator.calculate_field_coordinates(
-                ball_center, view_transformer, video_dimensions, frame_idx
+            # Convert to field coordinates using adaptive transformation
+            field_coord, method, confidence = adaptive_mapper.transform_point(
+                frame_idx, ball_center, camera_motion
             )
 
-            if len(field_coord) > 0:
-                ball_field_coords[int(frame_idx)] = [float(field_coord[0][0]), float(field_coord[0][1])]
+            # Skip if conversion failed (should be rare with adaptive fallbacks)
+            if field_coord is not None:
+                ball_field_coords[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
 
         return ball_field_coords
 
-    def calculate_all_metrics(self, all_tracks: Dict, view_transformers: Dict,
-                             video_info: sv.VideoInfo) -> Dict:
+    def calculate_all_metrics(self, all_tracks: Dict, adaptive_mapper,
+                             video_info: sv.VideoInfo, camera_movement: list = None) -> Dict:
         """
-        Calculate all analytics metrics from tracking data.
+        Calculate all analytics metrics from tracking data using adaptive homography.
 
         Args:
             all_tracks: Dictionary with keys 'player', 'ball', 'referee', 'player_classids'
-            view_transformers: Dictionary {frame_idx: ViewTransformer or None}
+            adaptive_mapper: AdaptiveHomographyMapper object
             video_info: Video information object from supervision
+            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
             Dictionary containing all calculated metrics:
@@ -116,7 +124,7 @@ class MetricsCalculator:
                 'player_analytics': {...}
             }
         """
-        print("Calculating analytics metrics...")
+        print("Calculating analytics metrics with adaptive homography...")
 
         # Extract data from all_tracks
         player_tracks = all_tracks.get('player', {})
@@ -129,19 +137,21 @@ class MetricsCalculator:
         # Step 1: Calculate player speeds and field coordinates
         print("  - Calculating player speeds and field coordinates...")
 
-        # DEBUG: Count non-None transformers
-        valid_transformers = sum(1 for t in view_transformers.values() if t is not None)
-        print(f"     Valid transformers: {valid_transformers}/{len(view_transformers)} frames")
-
         player_speeds = self.speed_calculator.calculate_speeds(
-            player_tracks, view_transformers, video_dimensions
+            player_tracks, adaptive_mapper, video_dimensions, camera_movement
         )
+
+        # Clear memory after speed calculation
+        gc.collect()
 
         # Step 2: Calculate ball field coordinates
         print("  - Calculating ball field coordinates...")
         ball_field_coords = self._calculate_ball_field_coordinates(
-            ball_tracks, view_transformers, video_dimensions
+            ball_tracks, adaptive_mapper, video_dimensions, camera_movement
         )
+
+        # Clear memory after ball coordinate calculation
+        gc.collect()
 
         # Step 3: Track ball possession
         print("  - Tracking ball possession...")
@@ -154,6 +164,9 @@ class MetricsCalculator:
             possession_events, team_assignments
         )
 
+        # Clear memory after possession tracking
+        gc.collect()
+
         # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
         print("  - Assigning ball to players frame-by-frame...")
         ball_assignments = self.ball_assigner.assign_ball_for_all_frames(
@@ -163,6 +176,9 @@ class MetricsCalculator:
         # Count touches from frame-by-frame assignments
         player_touches = self.ball_assigner.count_player_touches(ball_assignments)
         touch_frames = self.ball_assigner.get_player_touch_frames(ball_assignments)
+
+        # Clear memory after ball assignment
+        gc.collect()
 
         # Step 5: Detect passes with HYBRID VALIDATION (possession + touches + velocity)
         print("  - Detecting passes with hybrid validation...")
@@ -181,6 +197,9 @@ class MetricsCalculator:
             avg_confidence = sum(p.get('confidence_score', 0) for p in passes) / len(passes)
             print(f"    {len(passes)} passes detected ({hybrid_validated} hybrid-validated, avg confidence: {avg_confidence:.2f})")
 
+        # Clear memory after pass detection
+        gc.collect()
+
         # Step 7: Aggregate player analytics
         print("  - Aggregating player analytics...")
         player_analytics = self._aggregate_player_analytics(
@@ -188,6 +207,9 @@ class MetricsCalculator:
         )
 
         print(f"Analytics complete: {len(player_analytics)} players, {len(passes)} passes detected, {sum(player_touches.values())} total touches")
+
+        # Final cleanup
+        gc.collect()
 
         return {
             'fps': self.fps,

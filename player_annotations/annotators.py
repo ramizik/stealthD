@@ -1,11 +1,12 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
+import cv2
 import numpy as np
 import supervision as sv
-import cv2
 
 
 class AnnotatorManager:
@@ -28,7 +29,7 @@ class AnnotatorManager:
 
     def annotate_players(self, frame: np.ndarray, player_detections: sv.Detections) -> np.ndarray:
         """
-        Annotate only players on the frame.
+        Annotate only players on the frame with goalkeeper indicators.
 
         Args:
             frame: Input video frame
@@ -42,7 +43,41 @@ class AnnotatorManager:
 
         if player_detections.tracker_id is None:
             player_detections.tracker_id = np.arange(len(player_detections.xyxy))
-        player_labels = [f'#{tracker_id}' for tracker_id in player_detections.tracker_id]
+
+        # Debug: Print all tracker IDs in frame 150 to see what's being annotated
+        if not hasattr(self, '_frame_150_debug'):
+            import inspect
+            frame_obj = inspect.currentframe()
+            # Try to get frame index from call stack
+            self._debug_frame_count = getattr(self, '_debug_frame_count', 0)
+            if self._debug_frame_count == 150:
+                print(f"[FRAME 150 DEBUG] Total players to annotate: {len(player_detections.tracker_id)}")
+                print(f"[FRAME 150 DEBUG] Tracker IDs: {sorted(player_detections.tracker_id)}")
+                if hasattr(player_detections, 'data') and player_detections.data and 'is_goalkeeper' in player_detections.data:
+                    gk_mask = player_detections.data['is_goalkeeper']
+                    gk_ids = player_detections.tracker_id[gk_mask]
+                    print(f"[FRAME 150 DEBUG] Goalkeeper IDs: {gk_ids}")
+                self._frame_150_debug = True
+            self._debug_frame_count += 1
+
+        # Create labels with GK indicator if available
+        player_labels = []
+        for i, tracker_id in enumerate(player_detections.tracker_id):
+            label = f'#{tracker_id}'
+            # Check if this player is marked as goalkeeper (using custom data if available)
+            is_gk = False
+            if hasattr(player_detections, 'data') and player_detections.data is not None:
+                if 'is_goalkeeper' in player_detections.data:
+                    if player_detections.data['is_goalkeeper'][i]:
+                        label = f'GK#{tracker_id}'  # Mark as goalkeeper
+                        is_gk = True
+            player_labels.append(label)
+
+            # Debug: Print first few goalkeeper labels
+            if is_gk and not hasattr(self, '_gk_label_debug'):
+                print(f"[ANNOTATION DEBUG] Goalkeeper label created: '{label}' for tracker_id={tracker_id}")
+                self._gk_label_debug = True
+
         frame = self.ellipse_annotator.annotate(frame, player_detections)
         frame = self.label_annotator.annotate(frame, detections=player_detections, labels=player_labels)
 
@@ -134,7 +169,7 @@ class AnnotatorManager:
 
     def annotate_keypoints(self, frame: np.ndarray, keypoints: np.ndarray, confidence_threshold: float = 0.5,
                           draw_vertices: bool = True, draw_edges = None, draw_labels: bool = True,
-                          KEYPOINT_CONNECTIONS=[], KEYPOINT_NAMES={}, 
+                          KEYPOINT_CONNECTIONS=[], KEYPOINT_NAMES={},
                           KEYPOINT_COLOR=(0, 255, 0), CONNECTION_COLOR=(255, 0, 0), TEXT_COLOR=(255, 255, 255)) -> np.ndarray:
         """
         Annotate frame with detected keypoints using Vertex and Edge annotators.
@@ -184,7 +219,7 @@ class AnnotatorManager:
 
         return frame
 
-    def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None):
+    def convert_tracks_to_detections(self, player_tracks, ball_tracks, referee_tracks, player_classids=None, player_is_goalkeeper=None):
         """
         Convert tracking data back to supervision detections format.
 
@@ -193,6 +228,7 @@ class AnnotatorManager:
             ball_tracks: Ball tracking data for a frame
             referee_tracks: Referee tracking data for a frame
             player_classids: Player class ID data for a frame (optional)
+            player_is_goalkeeper: Player goalkeeper status for a frame (optional)
 
         Returns:
             Tuple of converted detection objects
@@ -205,12 +241,18 @@ class AnnotatorManager:
             else:
                 # Fall back to default class ID (0)
                 class_ids = [0] * len(player_tracks)
-            
+
             player_detections = sv.Detections(
                 xyxy=np.array(list(player_tracks.values())),
                 class_id=np.array(class_ids),
                 tracker_id=np.array(list(player_tracks.keys()))
             )
+
+            # Restore goalkeeper metadata if available
+            if player_is_goalkeeper is not None:
+                # Use .get() with default False for tracker IDs not in goalkeeper dict
+                goalkeeper_mask = np.array([player_is_goalkeeper.get(tracker_id, False) for tracker_id in player_tracks.keys()])
+                player_detections.data = {'is_goalkeeper': goalkeeper_mask}
         else:
             player_detections = None
 

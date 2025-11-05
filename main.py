@@ -1,18 +1,26 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
-from pipelines import TrackingPipeline, ProcessingPipeline, DetectionPipeline, KeypointPipeline
-from constants import model_path, test_video
-from keypoint_detection.keypoint_constants import keypoint_model_path
-import numpy as np
-import time
-from tqdm import tqdm
-import supervision as sv
+import gc
 import json
-import pickle
 import os
+import pickle
+import time
+
+import cv2
+import numpy as np
+import supervision as sv
+import torch
+from tqdm import tqdm
+
+from constants import GPU_DEVICE, REQUIRE_GPU, model_path, test_video
+from keypoint_detection.keypoint_constants import keypoint_model_path
+from pipelines import (DetectionPipeline, KeypointPipeline, ProcessingPipeline,
+                       TrackingPipeline)
+from utils.logger import DualLogger, create_log_path
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -30,6 +38,10 @@ class CompleteSoccerAnalysisPipeline:
         self.tracking_pipeline = TrackingPipeline(detection_model_path)
         self.processing_pipeline = ProcessingPipeline()
 
+        # Initialize ball tracker for anomaly filtering
+        from player_tracking import BallTracker
+        self.ball_tracker = BallTracker(buffer_size=10, max_distance=200)  # 200px max jump
+
     def initialize_models(self):
         """Initialize all models required for complete analysis."""
 
@@ -43,6 +55,10 @@ class CompleteSoccerAnalysisPipeline:
 
         init_time = time.time() - start_time
         print(f"All models initialized in {init_time:.2f}s")
+        print(f"✓ Ball tracker enabled (buffer=10, max_distance=200px for anomaly filtering)")
+
+        # Print memory status after initialization
+        self._print_memory_status("After Model Initialization")
 
     def analyze_video(self, video_path: str, frame_count: int = -1, output_suffix: str = "_complete_analysis"):
         """Run complete end-to-end soccer analysis.
@@ -75,15 +91,46 @@ class CompleteSoccerAnalysisPipeline:
         print("\n[Step 2/8] Training team assignment models...")
         self.tracking_pipeline.train_team_assignment_models(video_path)
 
-        # Step 3: Read video frames
-        print("\n[Step 3/8] Reading video frames...")
-        frames = self.processing_pipeline.read_video_frames(video_path, frame_count)
-        print(f"Loaded {len(frames)} frames for processing")
+        # Step 3: Get video info (no frame loading yet!)
+        print("\n[Step 3/8] Getting video information...")
+        video_info = sv.VideoInfo.from_video_path(video_path)
+        total_frames = video_info.total_frames if frame_count == -1 else min(frame_count, video_info.total_frames)
+        print(f"Video: {total_frames} frames at {video_info.fps} fps ({video_info.width}x{video_info.height})")
+        self._print_memory_status("After Video Info")
 
         # Setup cache directory
         video_path_obj = Path(video_path)
         cache_dir = video_path_obj.parent / "cache"
         cache_dir.mkdir(exist_ok=True)  # Create cache directory if it doesn't exist
+
+        # Step 3.5: Detect camera shot boundaries EARLY (before frame processing)
+        print("\n[Step 3.5/8] Detecting camera shot boundaries...")
+        from camera_analysis import ShotDetector
+
+        shot_stub_path = str(cache_dir / f"{video_path_obj.stem}_shot_boundaries.pkl")
+
+        shot_boundaries = None
+        shot_segments = None
+
+        try:
+            shot_detector = ShotDetector(threshold=30.0, min_scene_len=15)
+            shot_boundaries = shot_detector.detect_shots(
+                str(video_path),
+                read_from_stub=True,
+                stub_path=shot_stub_path,
+                downscale_factor=2  # Faster processing
+            )
+
+            # Get shot segments for potential use
+            shot_segments = shot_detector.get_shot_segments(shot_boundaries, total_frames)
+            print(f"  Shot detection complete: {len(shot_boundaries)} shots, {len(shot_segments)} segments")
+
+        except ImportError as e:
+            print(f"  PySceneDetect not available - skipping shot detection")
+            print(f"  Install with: pip install scenedetect[opencv]")
+        except Exception as e:
+            print(f"  Error during shot detection: {e}")
+            print(f"  Continuing without shot boundary information")
 
         # Check for cached frame processing data
         cache_path = cache_dir / f"{video_path_obj.stem}_frame_cache.pkl"
@@ -97,21 +144,37 @@ class CompleteSoccerAnalysisPipeline:
                 with open(cache_path, 'rb') as f:
                     cached_data = pickle.load(f)
 
-                # Validate cache matches current video
-                if (cached_data.get('num_frames') == len(frames) and
-                    cached_data.get('frame_count') == frame_count):
+                # Check cache version (version 3 uses adaptive mapper)
+                cache_version = cached_data.get('cache_version', 1)
+
+                # Validate cache matches current video and is correct version
+                if (cached_data.get('num_frames') == total_frames and
+                    cached_data.get('frame_count') == frame_count and
+                    cache_version == 3):  # Must be version 3 (adaptive mapper)
                     all_tracks = cached_data['all_tracks']
-                    view_transformers = cached_data['view_transformers']
+                    adaptive_mapper = cached_data['adaptive_mapper']
                     print(f"  ✓ Cache loaded successfully - skipping frame processing")
                 else:
-                    print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {len(frames)}, "
-                          f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
-                    all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+                    if cache_version < 3:
+                        print(f"  Old cache format detected (version {cache_version}) - reprocessing with adaptive mapper...")
+                    else:
+                        print(f"  Cache mismatch (frames: {cached_data.get('num_frames')} vs {total_frames}, "
+                              f"frame_count: {cached_data.get('frame_count')} vs {frame_count}) - reprocessing...")
+                    all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
             except Exception as e:
                 print(f"  Error loading cache: {e} - reprocessing...")
-                all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+                all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
         else:
-            all_tracks, view_transformers = self._process_frames(frames, video_path, cache_path, frame_count)
+            all_tracks, adaptive_mapper = self._process_frames_streaming(video_path, total_frames, cache_path, frame_count, shot_boundaries)
+
+        # Clear memory after frame processing
+        self._clear_memory()
+        self._print_memory_status("After Frame Processing")
+
+        # Store shot boundaries in tracks for JSON output
+        if shot_boundaries is not None:
+            all_tracks['shot_boundaries'] = shot_boundaries
+            all_tracks['shot_segments'] = shot_segments
 
         # Step 5: Ball track interpolation
         print("\n[Step 5/8] Interpolating ball tracks...")
@@ -121,14 +184,44 @@ class CompleteSoccerAnalysisPipeline:
         print("\n[Step 5.05/8] Estimating camera movement...")
         from camera_analysis import CameraMovementEstimator
 
-        camera_estimator = CameraMovementEstimator(frames[0])
         stub_path = str(cache_dir / f"{video_path_obj.stem}_camera_movement.pkl")
-        camera_movement = camera_estimator.get_camera_movement(
-            frames, read_from_stub=True, stub_path=stub_path
-        )
+
+        # Check if camera movement cache exists
+        if os.path.exists(stub_path):
+            print(f"  Loading cached camera movement from: {Path(stub_path).name}")
+            with open(stub_path, 'rb') as f:
+                camera_movement = pickle.load(f)
+            # Create estimator with first frame (load only one frame)
+            cap = cv2.VideoCapture(str(video_path))
+            ret, first_frame = cap.read()
+            cap.release()
+            if ret:
+                camera_estimator = CameraMovementEstimator(first_frame)
+            else:
+                print(f"  WARNING: Could not read first frame")
+                camera_estimator = None
+        else:
+            # Use STREAMING camera movement estimation (memory-efficient)
+            print(f"  Estimating camera movement with streaming (memory-efficient)...")
+            # Get first frame for estimator initialization
+            cap = cv2.VideoCapture(str(video_path))
+            ret, first_frame = cap.read()
+            cap.release()
+
+            if ret:
+                camera_estimator = CameraMovementEstimator(first_frame)
+                # Use streaming method instead of loading all frames
+                camera_movement = camera_estimator.get_camera_movement_streaming(
+                    str(video_path), total_frames, read_from_stub=True, stub_path=stub_path
+                )
+            else:
+                print(f"  WARNING: Could not read first frame")
+                camera_estimator = None
+                camera_movement = None
+
         print(f"  Camera movement estimated (will apply compensation after speed calculation)")
 
-        # Step 5.1: Stitch fragmented tracks (re-identification)
+        # Step 5.1: Stitching fragmented tracks (re-identification)
         print("\n[Step 5.1/8] Stitching fragmented player tracks...")
         from player_tracking import TrackStitcher
 
@@ -151,12 +244,40 @@ class CompleteSoccerAnalysisPipeline:
         from player_tracking import PlayerIDMapper
 
         id_mapper = PlayerIDMapper()
-        id_mapper.analyze_tracks(all_tracks['player'], all_tracks['player_classids'])
+        # Pass goalkeeper metadata to ID mapper so goalkeepers are prioritized
+        goalkeeper_metadata = all_tracks.get('player_is_goalkeeper', None)
+        id_mapper.analyze_tracks(all_tracks['player'], all_tracks['player_classids'], goalkeeper_metadata)
 
         # Remap all tracks to use fixed IDs
         all_tracks['player'] = id_mapper.map_player_tracks(all_tracks['player'])
         all_tracks['player_classids'] = id_mapper.map_team_assignments(all_tracks['player_classids'])
         all_tracks['referee'] = id_mapper.map_referee_tracks(all_tracks['referee'])
+
+        # Remap goalkeeper metadata to use fixed IDs and propagate to all frames
+        if 'player_is_goalkeeper' in all_tracks:
+            # First, identify which fixed IDs are goalkeepers
+            goalkeeper_fixed_ids = set()
+            for frame_idx, frame_goalkeepers in all_tracks['player_is_goalkeeper'].items():
+                for old_id, is_gk in frame_goalkeepers.items():
+                    if is_gk:
+                        # Map old ByteTrack ID to new fixed ID
+                        new_id = id_mapper.bytetrack_to_fixed.get(old_id, old_id)
+                        goalkeeper_fixed_ids.add(new_id)
+
+            # Print goalkeeper ID mapping
+            if goalkeeper_fixed_ids:
+                print(f"\n[GK ID MAPPING DEBUG] Goalkeeper fixed IDs: {sorted(goalkeeper_fixed_ids)}")
+
+            # Now propagate goalkeeper status to ALL frames where these players appear
+            remapped_goalkeeper = {}
+            for frame_idx, frame_players in all_tracks['player'].items():
+                remapped_goalkeeper[frame_idx] = {}
+                for player_id in frame_players.keys():
+                    # Mark as goalkeeper if this player ID is a goalkeeper
+                    remapped_goalkeeper[frame_idx][player_id] = (player_id in goalkeeper_fixed_ids)
+
+            all_tracks['player_is_goalkeeper'] = remapped_goalkeeper
+            print(f"[GK DEBUG] Goalkeeper status propagated to all {len(remapped_goalkeeper)} frames")
 
         # Store mapping info for JSON output
         id_mapping_info = id_mapper.get_mapping_summary()
@@ -177,7 +298,7 @@ class CompleteSoccerAnalysisPipeline:
         print(f"    Team 1: {team_summary.get('team_1_count', 0)} players")
 
         # Step 5.5: Calculate analytics metrics (BEFORE camera compensation)
-        # Use original pixel positions with frame-specific view transformers
+        # Use original pixel positions with adaptive homography mapper
         print("\n[Step 5.5/8] Calculating player speeds, possession, and passes...")
         from analytics import MetricsCalculator
 
@@ -185,19 +306,33 @@ class CompleteSoccerAnalysisPipeline:
         metrics_calculator = MetricsCalculator(fps=video_info.fps)
 
         # Calculate speeds using original tracks (not camera-compensated)
-        # Each frame's view transformer already accounts for camera position in that frame
+        # Adaptive homography provides per-frame transformation
         metrics_data = metrics_calculator.calculate_all_metrics(
             all_tracks,
-            view_transformers,
-            video_info
+            adaptive_mapper,
+            video_info,
+            camera_movement  # Pass camera movement for transformation
         )
+
+        # Step 5.55: Print adaptive homography statistics
+        print("\n[Step 5.55/8] Adaptive homography statistics...")
+        adaptive_mapper.print_statistics()
 
         # Step 5.6: Now apply camera compensation for track stitching and visualization
         print("\n[Step 5.6/8] Applying camera movement compensation for visualization...")
-        all_tracks = camera_estimator.compensate_track_positions(
-            all_tracks, camera_movement
-        )
-        print(f"  Camera movement compensation applied to tracks")
+        if camera_estimator is not None and camera_movement is not None:
+            all_tracks = camera_estimator.compensate_track_positions(
+                all_tracks, camera_movement
+            )
+            print(f"  Camera movement compensation applied to tracks")
+        else:
+            print(f"  Skipping camera movement compensation (estimator not available)")
+
+        # Clear memory before annotation
+        if camera_estimator is not None:
+            del camera_estimator
+        self._clear_memory()
+        self._print_memory_status("After Analytics")
 
         # Step 6: Player Annotation
         print("\n[Step 6/8] Assigning teams and Annotating frames with detections...")
@@ -205,29 +340,53 @@ class CompleteSoccerAnalysisPipeline:
         # (Analytics used original positions, but tracks are now compensated for storage)
         import copy
         annotation_tracks = copy.deepcopy(all_tracks)
-        annotation_tracks = camera_estimator.restore_camera_positions(annotation_tracks, camera_movement)
-        object_annotated_frames = self.tracking_pipeline.annotate_frames(frames, annotation_tracks)
+        if camera_movement is not None:
+            from camera_analysis import CameraMovementEstimator
 
-        # Step 7: Write final output video
-        output_frames = object_annotated_frames
-        print("\n[Step 7/8] Writing complete analysis video...")
+            # Recreate estimator for restoration (lightweight operation)
+            cap = cv2.VideoCapture(str(video_path))
+            ret, first_frame = cap.read()
+            cap.release()
+            if ret:
+                temp_estimator = CameraMovementEstimator(first_frame)
+                annotation_tracks = temp_estimator.restore_camera_positions(annotation_tracks, camera_movement)
+                del temp_estimator
+
+        # Step 7: Write final output video with STREAMING annotation (memory-efficient)
+        print("\n[Step 7/8] Annotating and writing video with streaming (memory-efficient)...")
         output_path = self.processing_pipeline.generate_output_path(video_path, output_suffix)
-        self.processing_pipeline.write_video_output(output_frames, output_path)
+
+        # Get video FPS
+        video_info = sv.VideoInfo.from_video_path(video_path)
+
+        # Define annotation callback for streaming
+        def annotate_callback(frame, frame_idx, tracks):
+            return self.tracking_pipeline.annotate_single_frame(frame, frame_idx, tracks)
+
+        # Stream, annotate, and write frames without loading all into memory
+        self.processing_pipeline.write_video_streaming(
+            video_path, output_path, annotation_tracks, annotate_callback, total_frames, fps=video_info.fps
+        )
+
+        # Clear annotation tracks from memory
+        del annotation_tracks
+        self._clear_memory()
+        self._print_memory_status("After Video Output")
 
         # Summary
         total_time = time.time() - total_start_time
         print(f"\n=== Complete Soccer Analysis Finished ===")
         print(f"Total processing time: {total_time:.2f}s")
-        print(f"Frames processed: {len(frames)}")
-        print(f"Average time per frame: {total_time/len(frames):.3f}s")
+        print(f"Frames processed: {total_frames}")
+        print(f"Average time per frame: {total_time/total_frames:.3f}s")
         print(f"Output saved to: {output_path}")
 
         # Step 8: Save analysis data to JSON
         print("\n[Step 8/8] Saving analysis data to JSON...")
-        # Generate JSON path properly (replace extension, not add to .mp4)
-        video_path_obj = Path(video_path)
-        json_output_path = str(video_path_obj.parent / f"{video_path_obj.stem}_analysis_data.json")
-        analysis_data = self._prepare_analysis_json(all_tracks, total_time, len(frames), metrics_data, id_mapping_info)
+        # Generate JSON paths in same output folder as the video
+        output_path_obj = Path(output_path)
+        json_output_path = str(output_path_obj.parent / f"{output_path_obj.stem}_analysis_data.json")
+        analysis_data = self._prepare_analysis_json(all_tracks, total_time, total_frames, metrics_data, id_mapping_info)
 
         # JSON conversion is now handled in _prepare_analysis_json via convert_to_serializable
         # Apply conversion to ensure all numpy types are converted before serialization
@@ -254,7 +413,8 @@ class CompleteSoccerAnalysisPipeline:
         llm_formatter = LLMDataFormatter()
         llm_data = llm_formatter.format_for_llm(analysis_data, video_path)
 
-        llm_json_path = str(video_path_obj.parent / f"{video_path_obj.stem}_analysis_data_llm.json")
+        # Save LLM JSON in same output folder as video
+        llm_json_path = str(output_path_obj.parent / f"{output_path_obj.stem}_analysis_data_llm.json")
         with open(llm_json_path, 'w') as f:
             json.dump(llm_data, f, indent=2)
         print(f"LLM-ready compact data saved to: {llm_json_path}")
@@ -433,46 +593,62 @@ class CompleteSoccerAnalysisPipeline:
 
     def _process_frames(self, frames, video_path, cache_path, frame_count):
         """Process all frames with detections, tracking, and team assignment."""
-        view_transformers = {}
         all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
 
-        # Initialize homography transformer for view transformers
-        from tactical_analysis.homography import HomographyTransformer
-        homography_transformer = HomographyTransformer()
+        # Initialize global homography mapper
+        from tactical_analysis.global_homography_mapper import \
+            GlobalHomographyMapper
+        global_mapper = GlobalHomographyMapper()
 
-        for i, frame in enumerate(tqdm(frames, desc="Processing frames")):
+        print(f"  [Global Homography] Accumulating keypoints from {len(frames)} frames...")
+
+        # Configure progress bar to update less frequently (every 2 seconds or ~5% of frames)
+        update_interval = max(1, len(frames) // 20)  # Update 20 times max
+        for i, frame in enumerate(tqdm(frames, desc="Processing frames",
+                                       mininterval=2.0, miniters=update_interval,
+                                       ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
 
             # Detect keypoints and objects
             keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
-            # Store view transformer for this frame (for metrics calculation)
-            if keypoints is not None:
-                try:
-                    view_transformer = homography_transformer.transform_to_pitch_keypoints(keypoints)
-                    view_transformers[i] = view_transformer
-                except:
-                    view_transformers[i] = None
-            else:
-                view_transformers[i] = None
+            # Filter ball detections using tracker (removes anomalies)
+            ball_detections = self.ball_tracker.update(ball_detections)
+
+            # Accumulate keypoints for global homography (instead of per-frame transformer)
+            global_mapper.add_frame_keypoints(i, keypoints)
 
             # Update with tracking
             player_detections = self.tracking_pipeline.tracking_callback(player_detections)
 
             # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections)
+            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections, frame_idx=i)
 
             # Store tracks for interpolation
             all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
 
-        # Save cache
-        print(f"  Saving frame processing cache to: {cache_path.name}")
+            # Periodic memory cleanup every 100 frames to prevent accumulation
+            if (i + 1) % 100 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+
+        # Build global homography from all accumulated keypoints
+        print(f"\n  [Step 4.5/8] Building global homography from accumulated keypoints...")
+        homography_success = global_mapper.build_global_homography()
+
+        if not homography_success:
+            print(f"  [WARNING] Failed to build global homography. Analytics may be inaccurate.")
+
+        # Save cache (now includes global mapper instead of per-frame transformers)
+        print(f"\n  Saving frame processing cache to: {cache_path.name}")
         try:
             cached_data = {
                 'all_tracks': all_tracks,
-                'view_transformers': view_transformers,
+                'global_mapper': global_mapper,  # Changed from view_transformers
                 'num_frames': len(frames),
-                'frame_count': frame_count  # Store frame_count to validate cache
+                'frame_count': frame_count,
+                'cache_version': 2  # Version 2 uses global mapper
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cached_data, f)
@@ -480,7 +656,174 @@ class CompleteSoccerAnalysisPipeline:
         except Exception as e:
             print(f"  Warning: Failed to save cache: {e}")
 
-        return all_tracks, view_transformers
+        return all_tracks, global_mapper
+
+    def _visualize_keypoints(self, frame: np.ndarray, keypoints: np.ndarray,
+                            frame_idx: int, output_dir: Path):
+        """Visualize detected keypoints on a frame and save debug image.
+
+        Args:
+            frame: Frame to annotate
+            keypoints: Detected keypoints (N, 32, 3) array
+            frame_idx: Frame index
+            output_dir: Directory to save visualization
+        """
+        from keypoint_detection.keypoint_constants import (
+            KEYPOINT_CONNECTIONS, KEYPOINT_NAMES)
+
+        if keypoints.shape[0] == 0:
+            return
+
+        # Get first detection
+        kpts = keypoints[0]  # (32, 3)
+
+        # Count visible keypoints
+        visible_count = (kpts[:, 2] > 0.5).sum()
+        avg_conf = kpts[:, 2].mean()
+
+        # Draw keypoints
+        for i, (x, y, conf) in enumerate(kpts):
+            if conf > 0.5:
+                # Draw circle
+                color = (0, 255, 0) if conf > 0.7 else (0, 165, 255)  # Green if high conf, orange otherwise
+                cv2.circle(frame, (int(x), int(y)), 6, color, -1)
+                cv2.circle(frame, (int(x), int(y)), 8, (255, 255, 255), 2)
+
+                # Draw keypoint ID
+                cv2.putText(frame, str(i), (int(x) + 12, int(y) - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(frame, str(i), (int(x) + 12, int(y) - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Draw connections
+        for conn in KEYPOINT_CONNECTIONS:
+            pt1_idx, pt2_idx = conn
+            if pt1_idx < len(kpts) and pt2_idx < len(kpts):
+                x1, y1, conf1 = kpts[pt1_idx]
+                x2, y2, conf2 = kpts[pt2_idx]
+
+                if conf1 > 0.5 and conf2 > 0.5:
+                    cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)),
+                            (255, 255, 0), 2)  # Cyan lines
+
+        # Add info overlay
+        info_bg = np.zeros((80, frame.shape[1], 3), dtype=np.uint8)
+        info_bg[:] = (0, 0, 0)
+        cv2.putText(info_bg, f"Frame {frame_idx} | Keypoints: {visible_count}/32 | Avg Conf: {avg_conf:.2f}",
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(info_bg, f"Green=High Conf (>0.7) | Orange=Medium Conf (0.5-0.7)",
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
+        # Combine frame and info
+        annotated = np.vstack([info_bg, frame])
+
+        # Save
+        output_path = output_dir / f"frame_{frame_idx:06d}_keypoints.jpg"
+        cv2.imwrite(str(output_path), annotated)
+
+    def _process_frames_streaming(self, video_path, total_frames, cache_path, frame_count, shot_boundaries=None):
+        """Process frames using streaming (generator) to avoid loading all into RAM.
+
+        Args:
+            video_path: Path to video file
+            total_frames: Total number of frames to process
+            cache_path: Path to save cache file
+            frame_count: Frame count limit (-1 for all)
+            shot_boundaries: Optional list of frame indices where camera shots change
+
+        Returns:
+            Tuple of (all_tracks, adaptive_mapper)
+        """
+        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
+
+        # Initialize adaptive homography mapper for moving camera
+        from tactical_analysis.adaptive_homography_mapper import \
+            AdaptiveHomographyMapper
+        adaptive_mapper = AdaptiveHomographyMapper()
+
+        # Set shot boundaries if provided (for scene-aware homography)
+        if shot_boundaries is not None and len(shot_boundaries) > 0:
+            adaptive_mapper.set_shot_boundaries(shot_boundaries)
+
+        print(f"  [Adaptive Homography] Processing {total_frames} frames with per-frame homography...")
+
+        # Setup keypoint visualization directory
+        output_dir = Path("output_videos") / "keypoint_debug"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Frames to visualize (sample evenly across video)
+        viz_frames = set([0, total_frames // 4, total_frames // 2, 3 * total_frames // 4, total_frames - 1])
+
+        # Use supervision's frame generator (does NOT load all frames into memory)
+        frame_generator = sv.get_video_frames_generator(
+            video_path,
+            end=total_frames if frame_count != -1 else None
+        )
+
+        # Configure progress bar to update less frequently
+        update_interval = max(1, total_frames // 20)  # Update 20 times max
+
+        for i, frame in enumerate(tqdm(frame_generator, total=total_frames, desc="Processing frames",
+                                       mininterval=2.0, miniters=update_interval,
+                                       ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
+
+            # Detect keypoints and objects
+            keypoints, metadata = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
+            player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
+
+            # Visualize keypoints on sample frames
+            if i in viz_frames and keypoints is not None and keypoints.size > 0:
+                self._visualize_keypoints(frame.copy(), keypoints, i, output_dir)
+
+            # Filter ball detections using tracker (removes anomalies)
+            ball_detections = self.ball_tracker.update(ball_detections)
+
+            # Add frame data to adaptive mapper (YOLO keypoints only)
+            adaptive_mapper.add_frame_data(i, keypoints)
+
+            # Update with tracking
+            player_detections = self.tracking_pipeline.tracking_callback(player_detections)
+
+            # Team assignment
+            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections, frame_idx=i)
+
+            # Store tracks for interpolation
+            all_tracks = self.tracking_pipeline.convert_detection_to_tracks(
+                player_detections, ball_detections, referee_detections, all_tracks, i
+            )
+
+            # Periodic memory cleanup every 100 frames to prevent accumulation
+            if (i + 1) % 100 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+
+        # Print statistics
+        print(f"\n  [Step 4.5/8] Adaptive homography processing complete")
+        adaptive_mapper.print_statistics()
+
+        # Print keypoint visualization info
+        print(f"\n  📊 Keypoint Debug Visualizations:")
+        print(f"     Saved {len(viz_frames)} sample frames to: {output_dir}")
+        print(f"     Check visualizations to verify pitch detection accuracy")
+
+        # Save cache (version 3 uses adaptive mapper)
+        print(f"\n  Saving frame processing cache to: {cache_path.name}")
+        try:
+            cached_data = {
+                'all_tracks': all_tracks,
+                'adaptive_mapper': adaptive_mapper,
+                'num_frames': total_frames,
+                'frame_count': frame_count,
+                'cache_version': 3  # Version 3 uses adaptive mapper
+            }
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cached_data, f)
+            print(f"  Cache saved successfully")
+        except Exception as e:
+            print(f"  Warning: Failed to save cache: {e}")
+
+        return all_tracks, adaptive_mapper
 
     def _calculate_statistics(self, all_tracks, num_frames):
         """
@@ -600,14 +943,74 @@ class CompleteSoccerAnalysisPipeline:
 
         return obj
 
+    def _clear_memory(self):
+        """Clear GPU and system memory."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        gc.collect()
+
+    def _print_memory_status(self, step_name: str):
+        """Print current memory usage for debugging."""
+        try:
+            import psutil
+            process = psutil.Process()
+            ram_gb = process.memory_info().rss / 1024**3
+
+            if torch.cuda.is_available():
+                gpu_allocated_gb = torch.cuda.memory_allocated(0) / 1024**3
+                gpu_reserved_gb = torch.cuda.memory_reserved(0) / 1024**3
+                print(f"  💾 [{step_name}] RAM: {ram_gb:.2f}GB | GPU Allocated: {gpu_allocated_gb:.2f}GB | GPU Reserved: {gpu_reserved_gb:.2f}GB")
+            else:
+                print(f"  💾 [{step_name}] RAM: {ram_gb:.2f}GB")
+        except ImportError:
+            # psutil not installed, skip memory reporting
+            pass
+
 
 
 if __name__ == "__main__":
-    # Run Complete End-to-End Soccer Analysis Pipeline
-    print("Starting Soccer Analysis...")
-    pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
-    output_video, json_output, llm_json_output = pipeline.analyze_video(str(test_video), frame_count=-1)
-    print(f"\nAnalysis finished!")
-    print(f"Output video: {output_video}")
-    print(f"Analysis data (JSON): {json_output}")
-    print(f"LLM-ready data (JSON): {llm_json_output}")
+    # Create log file path (before starting logger)
+    log_path = create_log_path(test_video, suffix="_complete_analysis")
+
+    # Start dual logging (console + file)
+    with DualLogger(str(log_path)):
+        # Check GPU availability before starting
+        print("="*70)
+        print("SYSTEM GPU CHECK")
+        print("="*70)
+
+        if torch.cuda.is_available():
+            print(f"✓ CUDA Available: YES")
+            print(f"✓ GPU Device: {torch.cuda.get_device_name(GPU_DEVICE)}")
+            print(f"✓ CUDA Version: {torch.version.cuda}")
+            print(f"✓ GPU Memory: {torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3:.2f} GB")
+            print(f"✓ Using GPU {GPU_DEVICE} for all processing")
+        else:
+            print(f"✗ CUDA Available: NO")
+            if REQUIRE_GPU:
+                print("\n" + "="*70)
+                print("ERROR: GPU REQUIRED BUT NOT AVAILABLE")
+                print("="*70)
+                print("This script requires GPU for processing.")
+                print("\nInstall CUDA-enabled PyTorch:")
+                print("  pip uninstall torch torchvision torchaudio")
+                print("  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
+                print("\nCheck NVIDIA drivers:")
+                print("  nvidia-smi")
+                print("\nTo allow CPU usage (VERY SLOW), set REQUIRE_GPU=False in constants.py")
+                print("="*70)
+                sys.exit(1)
+            else:
+                print("⚠️ WARNING: Running on CPU - This will be EXTREMELY slow!")
+
+        print("="*70 + "\n")
+
+        # Run Complete End-to-End Soccer Analysis Pipeline
+        print("Starting Soccer Analysis...")
+        pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
+        output_video, json_output, llm_json_output = pipeline.analyze_video(str(test_video), frame_count=-1)
+        print(f"\nAnalysis finished!")
+        print(f"Output video: {output_video}")
+        print(f"Analysis data: {json_output}")
+        print(f"LLM-formatted data: {llm_json_output}")

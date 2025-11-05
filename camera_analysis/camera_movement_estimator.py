@@ -14,8 +14,10 @@ import pickle
 import cv2
 import numpy as np
 import os
+import supervision as sv
 from typing import Dict, List, Tuple
 from utils import measure_distance, measure_xy_distance
+from tqdm import tqdm
 
 
 class CameraMovementEstimator:
@@ -137,6 +139,90 @@ class CameraMovementEstimator:
             old_gray = frame_gray.copy()
 
         print()  # New line after progress
+
+        # Save to cache
+        if stub_path is not None:
+            with open(stub_path, 'wb') as f:
+                pickle.dump(camera_movement, f)
+            print(f"  Camera movement cached to: {stub_path}")
+
+        return camera_movement
+
+    def get_camera_movement_streaming(self, video_path: str, total_frames: int,
+                                      read_from_stub: bool = False,
+                                      stub_path: str = None) -> List[List[float]]:
+        """
+        Calculate camera movement using streaming (memory-efficient).
+
+        Args:
+            video_path: Path to video file
+            total_frames: Total number of frames to process
+            read_from_stub: If True, try to load cached results
+            stub_path: Path to pickle file for caching
+
+        Returns:
+            List of [x_movement, y_movement] for each frame
+        """
+        # Try to load from cache
+        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            with open(stub_path, 'rb') as f:
+                camera_movement = pickle.load(f)
+                print(f"  Loaded cached camera movement from: {stub_path}")
+                return camera_movement
+
+        print(f"  Analyzing camera movement across {total_frames} frames (streaming)...")
+
+        # Initialize camera movement (no movement for first frame)
+        camera_movement = [[0, 0]] * total_frames
+
+        # Use supervision's frame generator for memory efficiency
+        frame_generator = sv.get_video_frames_generator(video_path, end=total_frames)
+
+        # Get first frame and initial features
+        first_frame = next(frame_generator)
+        old_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+        old_features = cv2.goodFeaturesToTrack(old_gray, **self.features)
+
+        # Process remaining frames
+        update_interval = max(1, total_frames // 50)  # Update 50 times max
+        for frame_num, frame in enumerate(tqdm(frame_generator, total=total_frames-1,
+                                               desc="Camera movement",
+                                               mininterval=2.0, miniters=update_interval,
+                                               ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]'),
+                                        start=1):  # Start from frame 1
+
+            # Convert current frame to grayscale
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Calculate optical flow
+            new_features, _, _ = cv2.calcOpticalFlowPyrLK(
+                old_gray, frame_gray, old_features, None, **self.lk_params
+            )
+
+            # Find maximum movement among tracked features
+            max_distance = 0
+            camera_movement_x, camera_movement_y = 0, 0
+
+            if new_features is not None and old_features is not None:
+                for i, (new, old) in enumerate(zip(new_features, old_features)):
+                    new_features_point = new.ravel()
+                    old_features_point = old.ravel()
+
+                    distance = measure_distance(new_features_point, old_features_point)
+
+                    if distance > max_distance:
+                        max_distance = distance
+                        camera_movement_x, camera_movement_y = measure_xy_distance(
+                            old_features_point, new_features_point
+                        )
+
+            # Only update if movement exceeds threshold
+            if max_distance > self.minimum_distance:
+                camera_movement[frame_num] = [camera_movement_x, camera_movement_y]
+                # Re-detect features for next frame
+                old_features = cv2.goodFeaturesToTrack(frame_gray, **self.features)
+
+            old_gray = frame_gray.copy()
 
         # Save to cache
         if stub_path is not None:

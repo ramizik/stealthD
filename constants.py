@@ -50,13 +50,8 @@ model_path = PROJECT_DIR / model_path
 # UPDATE THIS: Point to your actual test video file
 test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
 
-# Output video path
-# UPDATE THIS: Where you want the tracked video to be saved
-test_video_output = PROJECT_DIR / r"output_videos\sample_1_output.mp4"
-
 # Alternative video paths (examples)
 # test_video = PROJECT_DIR / "test_videos/sample.mp4"
-# test_video_output = PROJECT_DIR / "output/tracked_sample.mp4"
 
 # For webcam input (use with real-time detection)
 # webcam_index = 0  # Usually 0 for default webcam
@@ -67,9 +62,11 @@ test_video_output = PROJECT_DIR / r"output_videos\sample_1_output.mp4"
 
 # Team assignment training parameters
 TRAINING_FRAME_STRIDE = 12        # Skip frames during training data collection
-TRAINING_FRAME_LIMIT = 120 * 24   # Maximum frames for training (120*24 = ~2 mins at 24fps)
+TRAINING_FRAME_PERCENTAGE = 0.20  # Use 20% of total video frames for training (dynamic)
+TRAINING_FRAME_MIN = 1200         # Minimum frames to use (50 seconds at 24fps)
+TRAINING_FRAME_MAX = 7200         # Maximum frames to use (5 minutes at 24fps)
 
-# Clustering parameters  
+# Clustering parameters
 EMBEDDING_BATCH_SIZE = 24         # Batch size for SigLIP embedding extraction
 UMAP_COMPONENTS = 3               # UMAP dimensionality reduction components
 N_TEAMS = 2                       # Number of teams to cluster (usually 2)
@@ -77,6 +74,14 @@ N_TEAMS = 2                       # Number of teams to cluster (usually 2)
 # Tracking parameters
 TRACKER_MATCH_THRESH = 0.5        # ByteTrack matching threshold
 TRACKER_BUFFER_SIZE = 120         # Number of frames to keep in tracking buffer
+
+# Detection quality filtering (SoccerNet-style)
+# NOTE: Relaxed from original SoccerNet values (10, 1.6) to avoid filtering legitimate players
+MIN_BOX_AREA = 100                # Minimum bounding box area (px²) to keep detection (was 10)
+ASPECT_RATIO_THRESH = 3.0         # Maximum aspect ratio (h/w) - filters vertical false positives (was 1.6)
+
+# Detection parameters
+DETECTION_CONFIDENCE = 0.1        # Lower threshold to detect distant goalkeepers (default YOLO: 0.25)
 
 # Ball interpolation
 BALL_INTERPOLATION_LIMIT = 30     # Max frames to interpolate missing ball detections
@@ -87,7 +92,7 @@ BALL_INTERPOLATION_LIMIT = 30     # Max frames to interpolate missing ball detec
 
 CLASS_NAMES = {
     0: "Player",
-    1: "Ball", 
+    1: "Ball",
     2: "Referee"
 }
 
@@ -103,7 +108,7 @@ CLASS_COLORS = {
 # =============================================================================
 
 # GPU settings
-USE_GPU = True                    # Set to False to force CPU usage
+REQUIRE_GPU = True                # If True, script will exit if GPU is not available
 GPU_DEVICE = 0                    # GPU device index (if multiple GPUs)
 
 # Processing settings
@@ -125,12 +130,12 @@ SAHI_OVERLAP_WIDTH = 0.2          # SAHI overlap ratio
 def validate_config():
     """Validate configuration and provide helpful messages."""
     issues = []
-    
+
     # Check model path
     if not model_path.exists():
         issues.append(f"Model not found at: {model_path}")
         issues.append("Download from: https://huggingface.co/Adit-jain/soccana")
-    
+
     return issues
 
 # Print configuration status
@@ -139,9 +144,8 @@ if __name__ == "__main__":
     print(f"Project Directory: {PROJECT_DIR}")
     print(f"Model Path: {model_path}")
     print(f"Test Video: {test_video}")
-    print(f"Output Path: {test_video_output}")
     print()
-    
+
     issues = validate_config()
     if issues:
         print("WARNING - Configuration Issues:")

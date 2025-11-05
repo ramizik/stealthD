@@ -1,10 +1,11 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-# Keypoint model paths
-keypoint_model_path = r"Models/Trained/yolov11_keypoints_29/Model/weights/best.pt"
+# Keypoint model paths - Updated to use new pitch detection model (32 keypoints)
+keypoint_model_path = r"Models/Trained/pitch_detection/weights/best.pt"
 keypoint_model_path = PROJECT_DIR / keypoint_model_path
 
 # Dataset configuration
@@ -15,25 +16,25 @@ test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
 test_video_output = PROJECT_DIR / r"output_videos\sample_1_keypoints.mp4"
 
 # Keypoint model configuration
-NUM_KEYPOINTS = 29
+NUM_KEYPOINTS = 32  # Updated from 29 to 32 for new pitch detection model
 KEYPOINT_DIMENSIONS = 3  # (x, y, visibility)
 CONFIDENCE_THRESHOLD = 0.5
 
-# Soccer field keypoint names (29 keypoints)
+# Soccer field keypoint names (32 keypoints) - Updated for new pitch detection model
 KEYPOINT_NAMES = {
     0: "sideline_top_left",
-    1: "big_rect_left_top_pt1", 
+    1: "big_rect_left_top_pt1",
     2: "big_rect_left_top_pt2",
     3: "big_rect_left_bottom_pt1",
     4: "big_rect_left_bottom_pt2",
     5: "small_rect_left_top_pt1",
-    6: "small_rect_left_top_pt2", 
+    6: "small_rect_left_top_pt2",
     7: "small_rect_left_bottom_pt1",
     8: "small_rect_left_bottom_pt2",
     9: "sideline_bottom_left",
     10: "left_semicircle_right",
     11: "center_line_top",
-    12: "center_line_bottom", 
+    12: "center_line_bottom",
     13: "center_circle_top",
     14: "center_circle_bottom",
     15: "field_center",
@@ -44,46 +45,49 @@ KEYPOINT_NAMES = {
     20: "big_rect_right_bottom_pt2",
     21: "small_rect_right_top_pt1",
     22: "small_rect_right_top_pt2",
-    23: "small_rect_right_bottom_pt1", 
+    23: "small_rect_right_bottom_pt1",
     24: "small_rect_right_bottom_pt2",
     25: "sideline_bottom_right",
     26: "right_semicircle_left",
     27: "center_circle_left",
     28: "center_circle_right",
+    29: "keypoint_29",  # Additional keypoint from 32-point model
+    30: "keypoint_30",  # Additional keypoint from 32-point model
+    31: "keypoint_31",  # Additional keypoint from 32-point model
 }
 
 # Keypoint connections for visualization
 KEYPOINT_CONNECTIONS = [
     # Field boundary connections
     (0, 16),   # Top left to top right
-    (0, 9),    # Top left to bottom left  
+    (0, 9),    # Top left to bottom left
     (16, 25),  # Top right to bottom right
     (9, 25),   # Bottom left to bottom right
-    
+
     # Left penalty area
     (1, 2),    # Big rect left top connections
     (3, 4),    # Big rect left bottom connections
     (1, 3),    # Big rect left vertical
     (2, 4),    # Big rect left vertical
-    
+
     # Left goal area
     (5, 6),    # Small rect left top connections
     (7, 8),    # Small rect left bottom connections
     (5, 7),    # Small rect left vertical
     (6, 8),    # Small rect left vertical
-    
+
     # Right penalty area
     (17, 18),  # Big rect right top connections
     (19, 20),  # Big rect right bottom connections
     (17, 19),  # Big rect right vertical
     (18, 20),  # Big rect right vertical
-    
+
     # Right goal area
     (21, 22),  # Small rect right top connections
     (23, 24),  # Small rect right bottom connections
     (21, 23),  # Small rect right vertical
     (22, 24),  # Small rect right vertical
-    
+
     # Center line and circle
     (11, 12),  # Center line vertical
     (13, 14),  # Center circle vertical
@@ -92,22 +96,7 @@ KEYPOINT_CONNECTIONS = [
 # Field corner keypoint indices
 FIELD_CORNERS = {
     'top_left': 0,
-    'top_right': 16, 
+    'top_right': 16,
     'bottom_left': 9,
     'bottom_right': 25
 }
-
-# Standard FIFA field dimensions (in meters)
-FIFA_FIELD_LENGTH = 105.0  # meters
-FIFA_FIELD_WIDTH = 68.0    # meters
-
-# Penalty area dimensions (in meters)
-PENALTY_AREA_LENGTH = 16.5
-PENALTY_AREA_WIDTH = 40.3
-
-# Goal area dimensions (in meters)  
-GOAL_AREA_LENGTH = 5.5
-GOAL_AREA_WIDTH = 18.3
-
-# Center circle radius (in meters)
-CENTER_CIRCLE_RADIUS = 9.15
