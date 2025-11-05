@@ -479,7 +479,3 @@ if __name__ == "__main__":
 
     # Option 6: Real-time analysis tactical-only
     pipeline.analyze_realtime(test_video, display_mode="tactical-only")
-    # Option 6: Real-time analysis tactical-only
-    pipeline.analyze_realtime(test_video, display_mode="tactical-only")
-    # Option 6: Real-time analysis tactical-only
-    pipeline.analyze_realtime(test_video, display_mode="tactical-only")

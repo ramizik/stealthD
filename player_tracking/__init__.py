@@ -10,5 +10,3 @@ from player_tracking.track_stitcher import TrackStitcher
 from player_tracking.tracking import TrackerManager
 
 __all__ = ["TrackerManager", "PlayerIDMapper", "TrackStitcher", "BallTracker", "BallAnnotator"]
-__all__ = ["TrackerManager", "PlayerIDMapper", "TrackStitcher", "BallTracker", "BallAnnotator"]
-__all__ = ["TrackerManager", "PlayerIDMapper", "TrackStitcher", "BallTracker", "BallAnnotator"]

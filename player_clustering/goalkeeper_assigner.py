@@ -141,9 +141,3 @@ class GoalkeeperAssigner:
         gk_assignments = {gk_id: int(team_id) for gk_id, team_id in zip(gk_ids, gk_team_ids)}
 
         return gk_assignments
-
-        return gk_assignments
-
-        return gk_assignments
-
-        return gk_assignments

@@ -252,7 +252,3 @@ class HomographyTransformer:
         except Exception as e:
             print(f"Error transforming points: {e}")
             return None
-            print(f"Error transforming points: {e}")
-            return None
-            print(f"Error transforming points: {e}")
-            return None

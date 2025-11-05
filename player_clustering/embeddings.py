@@ -118,6 +118,3 @@ class EmbeddingExtractor:
         gc.collect()
 
         return data
-        return data
-        return data
-        return data
