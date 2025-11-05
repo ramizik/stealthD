@@ -3,6 +3,11 @@ Speed Calculator module for soccer player speed and distance metrics.
 
 Calculates player speeds using field coordinates (105m x 68m) with homography
 transformation fallback to linear scaling.
+
+STABILITY ENHANCEMENTS:
+- Kalman filtering for per-player position smoothing
+- Physical plausibility checks (max speed constraints)
+- Outlier rejection based on velocity
 """
 
 import sys
@@ -14,6 +19,8 @@ sys.path.append(str(PROJECT_DIR))
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+
+from tactical_analysis.position_smoother import PlayerPositionSmoother
 
 
 class SpeedCalculator:
@@ -37,6 +44,14 @@ class SpeedCalculator:
         self.fps = fps
         self.last_valid_transformer = None  # Cache for last valid transformer
         self.last_transformer_frame = None   # Frame index of cached transformer
+
+        # POSITION SMOOTHER: Critical addition to eliminate homography discontinuities
+        self.position_smoother = PlayerPositionSmoother(
+            dt=1.0/fps,                # Time between frames
+            max_speed_ms=17.0,         # 17 m/s = 61 km/h (allow sprints, was 15 m/s)
+            process_noise=0.5,         # Moderate smoothing
+            measurement_noise=2.0      # Trust measurements but smooth outliers
+        )
 
     def _is_catastrophically_bad(self, field_coords: np.ndarray) -> bool:
         """
@@ -269,14 +284,23 @@ class SpeedCalculator:
                     camera_motion = tuple(camera_movement[frame_idx])
 
                 # Convert to field coordinates using adaptive per-frame transformation
-                field_coord, transform_method, confidence = adaptive_mapper.transform_point(
+                field_coord_raw, transform_method, confidence = adaptive_mapper.transform_point(
                     frame_idx, foot_pos_array, camera_motion
                 )
 
                 # Should never be None with adaptive transform, but check anyway
-                if field_coord is None:
+                if field_coord_raw is None:
                     print(f"[WARNING] Unexpected None coordinate for player {player_id} frame {frame_idx}")
                     continue
+
+                # CRITICAL: Apply Kalman smoothing AFTER homography transformation
+                # This eliminates position jumps from matrix discontinuities
+                field_coord, is_outlier = self.position_smoother.smooth_position(
+                    player_id, field_coord_raw, frame_idx=frame_idx
+                )
+
+                # DEBUG: Log smoothing corrections (removed - now in position_smoother)
+                # if is_outlier and i < 5:  # Already logged in position_smoother with more detail
 
                 # DEBUG: Log out-of-bounds coordinates
                 if (field_coord[0] < 0 or field_coord[0] > self.field_width or
@@ -368,6 +392,9 @@ class SpeedCalculator:
         # Print debug statistics from AdaptiveHomographyMapper
         if hasattr(adaptive_mapper, 'print_debug_stats'):
             adaptive_mapper.print_debug_stats()
+
+        # Print position smoother statistics
+        self.position_smoother.print_statistics()
 
         # Find top 5 fastest players
         if player_speeds:

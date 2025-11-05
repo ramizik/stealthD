@@ -48,7 +48,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video path
 # UPDATE THIS: Point to your actual test video file
-test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
+test_video = PROJECT_DIR / r"input_videos\sample_6.mp4"
 
 # Alternative video paths (examples)
 # test_video = PROJECT_DIR / "test_videos/sample.mp4"
@@ -62,7 +62,9 @@ test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
 
 # Team assignment training parameters
 TRAINING_FRAME_STRIDE = 12        # Skip frames during training data collection
-TRAINING_FRAME_LIMIT = 120 * 24   # Maximum frames for training (120*24 = ~2 mins at 24fps)
+TRAINING_FRAME_PERCENTAGE = 0.20  # Use 20% of total video frames for training (dynamic)
+TRAINING_FRAME_MIN = 1200         # Minimum frames to use (50 seconds at 24fps)
+TRAINING_FRAME_MAX = 7200         # Maximum frames to use (5 minutes at 24fps)
 
 # Clustering parameters
 EMBEDDING_BATCH_SIZE = 24         # Batch size for SigLIP embedding extraction

@@ -261,7 +261,7 @@ class AdaptiveHomographyMapper:
                     if num_keypoints >= 20:
                         # Even with good keypoints, use VERY aggressive smoothing
                         is_scene_change = True
-                        alpha = 0.05  # 5% new, 95% old - extreme smoothing
+                        alpha = 0.02  # 2% new, 98% old - extreme smoothing
 
                         if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
                             print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 CATASTROPHIC change "
@@ -278,7 +278,7 @@ class AdaptiveHomographyMapper:
                     # VERY LARGE change - use very aggressive smoothing
                     if num_keypoints >= 20:
                         is_scene_change = True
-                        alpha = 0.1  # 10% new, 90% old
+                        alpha = 0.05  # 5% new, 95% old
 
                         if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
                             print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Very large change "
@@ -294,20 +294,21 @@ class AdaptiveHomographyMapper:
                     # LARGE change (like frame 528-529) - use aggressive smoothing
                     if num_keypoints >= 20:
                         is_scene_change = True
-                        alpha = 0.15  # 15% new, 85% old - THIS FIXES THE 10-14m JUMPS
+                        alpha = 0.08  # 8% new, 92% old - MUCH MORE AGGRESSIVE
 
-                        if frame_idx < 10 or (self.homography_success_count < 20 and is_scene_change):
+                        # DEBUG: Always log frames 200-220 to catch Player 19/20 jumps
+                        if frame_idx < 10 or (self.homography_success_count < 20 and is_scene_change) or (200 <= frame_idx <= 220):
                             print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Large change "
-                                  f"(diff: {max_diff_raw:.1f}) - using alpha={alpha}")
+                                  f"(diff: {max_diff_raw:.1f}, {num_keypoints} keypoints) - using alpha={alpha}")
                     else:
                         should_reject = True
 
-                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                        if self.matrix_rejected_count < 10 or frame_idx % 100 == 0 or (200 <= frame_idx <= 220):
                             print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED medium change "
                                   f"(diff: {max_diff_raw:.1f}, only {num_keypoints} keypoints)")
                 else:
                     # Normal frame - use slow, stable smoothing
-                    alpha = 0.2  # 20% new, 80% old for normal frames
+                    alpha = 0.10  # 10% new, 90% old for normal frames (was 0.2)
 
                 if should_reject:
                     # Reject this frame - keep previous matrix
@@ -345,7 +346,8 @@ class AdaptiveHomographyMapper:
                     # Even after median + EMA, change is too large - reject
                     self.matrix_rejected_count += 1
 
-                    if self.matrix_rejected_count < 10 or frame_idx % 100 == 0:
+                    # DEBUG: Always log frames 200-220 rejections
+                    if self.matrix_rejected_count < 10 or frame_idx % 100 == 0 or (200 <= frame_idx <= 220):
                         print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ REJECTED - still unstable after smoothing "
                               f"(raw: {max_diff_raw:.1f} → smooth: {max_diff_smooth:.1f} > threshold: {safety_threshold}) "
                               f"- keeping previous")

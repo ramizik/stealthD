@@ -20,6 +20,7 @@ from constants import GPU_DEVICE, REQUIRE_GPU, model_path, test_video
 from keypoint_detection.keypoint_constants import keypoint_model_path
 from pipelines import (DetectionPipeline, KeypointPipeline, ProcessingPipeline,
                        TrackingPipeline)
+from utils.logger import DualLogger, create_log_path
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -902,42 +903,50 @@ class CompleteSoccerAnalysisPipeline:
 
 
 if __name__ == "__main__":
-    # Check GPU availability before starting
-    print("="*70)
-    print("SYSTEM GPU CHECK")
-    print("="*70)
+    # Create log file path (before starting logger)
+    log_path = create_log_path(test_video, suffix="_complete_analysis")
 
-    if torch.cuda.is_available():
-        print(f"✓ CUDA Available: YES")
-        print(f"✓ GPU Device: {torch.cuda.get_device_name(GPU_DEVICE)}")
-        print(f"✓ CUDA Version: {torch.version.cuda}")
-        print(f"✓ GPU Memory: {torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3:.2f} GB")
-        print(f"✓ Using GPU {GPU_DEVICE} for all processing")
-    else:
-        print(f"✗ CUDA Available: NO")
-        if REQUIRE_GPU:
-            print("\n" + "="*70)
-            print("ERROR: GPU REQUIRED BUT NOT AVAILABLE")
-            print("="*70)
-            print("This script requires GPU for processing.")
-            print("\nInstall CUDA-enabled PyTorch:")
-            print("  pip uninstall torch torchvision torchaudio")
-            print("  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
-            print("\nCheck NVIDIA drivers:")
-            print("  nvidia-smi")
-            print("\nTo allow CPU usage (VERY SLOW), set REQUIRE_GPU=False in constants.py")
-            print("="*70)
-            sys.exit(1)
+    # Start dual logging (console + file)
+    with DualLogger(str(log_path)):
+        # Check GPU availability before starting
+        print("="*70)
+        print("SYSTEM GPU CHECK")
+        print("="*70)
+
+        if torch.cuda.is_available():
+            print(f"✓ CUDA Available: YES")
+            print(f"✓ GPU Device: {torch.cuda.get_device_name(GPU_DEVICE)}")
+            print(f"✓ CUDA Version: {torch.version.cuda}")
+            print(f"✓ GPU Memory: {torch.cuda.get_device_properties(GPU_DEVICE).total_memory / 1024**3:.2f} GB")
+            print(f"✓ Using GPU {GPU_DEVICE} for all processing")
         else:
-            print("⚠️ WARNING: Running on CPU - This will be EXTREMELY slow!")
+            print(f"✗ CUDA Available: NO")
+            if REQUIRE_GPU:
+                print("\n" + "="*70)
+                print("ERROR: GPU REQUIRED BUT NOT AVAILABLE")
+                print("="*70)
+                print("This script requires GPU for processing.")
+                print("\nInstall CUDA-enabled PyTorch:")
+                print("  pip uninstall torch torchvision torchaudio")
+                print("  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
+                print("\nCheck NVIDIA drivers:")
+                print("  nvidia-smi")
+                print("\nTo allow CPU usage (VERY SLOW), set REQUIRE_GPU=False in constants.py")
+                print("="*70)
+                sys.exit(1)
+            else:
+                print("⚠️ WARNING: Running on CPU - This will be EXTREMELY slow!")
 
-    print("="*70 + "\n")
+        print("="*70 + "\n")
 
-    # Run Complete End-to-End Soccer Analysis Pipeline
-    print("Starting Soccer Analysis...")
-    pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
-    output_video, json_output, llm_json_output = pipeline.analyze_video(str(test_video), frame_count=-1)
-    print(f"\nAnalysis finished!")
+        # Run Complete End-to-End Soccer Analysis Pipeline
+        print("Starting Soccer Analysis...")
+        pipeline = CompleteSoccerAnalysisPipeline(model_path, keypoint_model_path)
+        output_video, json_output, llm_json_output = pipeline.analyze_video(str(test_video), frame_count=-1)
+        print(f"\nAnalysis finished!")
+        print(f"Output video: {output_video}")
+        print(f"Analysis data: {json_output}")
+        print(f"LLM-formatted data: {llm_json_output}")
     print(f"Output video: {output_video}")
     print(f"Analysis data (JSON): {json_output}")
     print(f"LLM-ready data (JSON): {llm_json_output}")

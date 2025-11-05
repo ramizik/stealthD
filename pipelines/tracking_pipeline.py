@@ -1,22 +1,26 @@
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
-import time
-import supervision as sv
-from tqdm import tqdm
-import pickle
-import os
-import torch
 import gc
+import os
+import pickle
+import time
 
+import numpy as np
+import supervision as sv
+import torch
+from tqdm import tqdm
+
+from constants import (TRAINING_FRAME_MAX, TRAINING_FRAME_MIN,
+                       TRAINING_FRAME_PERCENTAGE, TRAINING_FRAME_STRIDE)
 from pipelines.detection_pipeline import DetectionPipeline
 from pipelines.processing_pipeline import ProcessingPipeline
-from player_tracking import TrackerManager
-from player_clustering import ClusteringManager
 from player_annotations import AnnotatorManager
+from player_clustering import ClusteringManager
+from player_tracking import TrackerManager
 
 
 class TrackingPipeline:
@@ -85,17 +89,29 @@ class TrackingPipeline:
 
         # Get video info to avoid requesting frames beyond video length
         video_info = sv.VideoInfo.from_video_path(video_path)
-        max_end_frame = min(120*24, video_info.total_frames)
 
-        print(f"Video has {video_info.total_frames} frames, collecting crops from first {max_end_frame} frames (stride=12)")
+        # Calculate dynamic frame limit based on video length (20% of total frames)
+        dynamic_frame_limit = int(video_info.total_frames * TRAINING_FRAME_PERCENTAGE)
+
+        # Apply min/max constraints
+        dynamic_frame_limit = max(TRAINING_FRAME_MIN, min(TRAINING_FRAME_MAX, dynamic_frame_limit))
+
+        # Ensure we don't exceed total frames
+        max_end_frame = min(dynamic_frame_limit, video_info.total_frames)
+
+        # Calculate expected number of frames to process (for progress bar)
+        expected_frames = max_end_frame // TRAINING_FRAME_STRIDE
+
+        print(f"Video has {video_info.total_frames} frames, collecting crops from first {max_end_frame} frames (stride={TRAINING_FRAME_STRIDE})")
+        print(f"  Expected to process ~{expected_frames} frames ({TRAINING_FRAME_PERCENTAGE*100:.0f}% of video)")
 
         # Get video frames
-        frame_generator = sv.get_video_frames_generator(video_path, stride=12, end=max_end_frame)
+        frame_generator = sv.get_video_frames_generator(video_path, stride=TRAINING_FRAME_STRIDE, end=max_end_frame)
 
-        # Extract player crops
+        # Extract player crops with improved progress bar
         crops = []
         frame_count = 0
-        for frame in tqdm(frame_generator, desc='collecting_crops',
+        for frame in tqdm(frame_generator, desc='collecting_crops', total=expected_frames,
                          mininterval=2.0, ncols=100,
                          bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]'):
             player_detections, _, _ = self.detection_pipeline.detect_frame_objects(frame)
@@ -110,6 +126,16 @@ class TrackingPipeline:
                 gc.collect()
 
         print(f"Collected {len(crops)} player crops")
+
+        # Validation: Check if we have sufficient crops for training
+        min_crops_required = 100  # Minimum crops needed for reliable training
+        if len(crops) < min_crops_required:
+            print(f"  ⚠️ WARNING: Only {len(crops)} player crops collected (recommended: >{min_crops_required}).")
+            print(f"  This may result in poor team assignment. Consider:")
+            print(f"    - Increasing TRAINING_FRAME_PERCENTAGE (current: {TRAINING_FRAME_PERCENTAGE*100:.0f}%)")
+            print(f"    - Decreasing TRAINING_FRAME_STRIDE (current: {TRAINING_FRAME_STRIDE})")
+        else:
+            print(f"  ✓ Sufficient training data collected ({len(crops)} crops)")
 
         # Final cleanup after crop collection
         if torch.cuda.is_available():
@@ -560,4 +586,5 @@ if __name__ == "__main__":
     # pipeline.track_in_video(test_video, output_path, frame_count=300, train_models=True)
 
     # Option 2: Real-time tracking analysis
+    pipeline.track_realtime(test_video, display_metadata=True)    # Option 2: Real-time tracking analysis
     pipeline.track_realtime(test_video, display_metadata=True)
