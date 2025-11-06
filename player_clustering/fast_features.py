@@ -37,6 +37,12 @@ class FastFeatureExtractor:
         Returns:
             Normalized color histogram feature vector
         """
+        # Validate image is not empty
+        if image is None or image.size == 0 or image.shape[0] == 0 or image.shape[1] == 0:
+            # Return zero vector for invalid images
+            total_bins = sum(self.bins)
+            return np.zeros(total_bins)
+
         # Convert to HSV for better color representation
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
@@ -100,6 +106,8 @@ class FastFeatureExtractor:
             return np.array([]).reshape(0, self.feature_dim)
 
         features = []
+        invalid_count = 0
+
         for crop in crops:
             # Convert PIL to numpy BGR
             if isinstance(crop, Image.Image):
@@ -116,13 +124,32 @@ class FastFeatureExtractor:
                 # Already numpy array
                 img_bgr = crop
 
+            # Validate crop before processing
+            if img_bgr is None or img_bgr.size == 0 or img_bgr.shape[0] == 0 or img_bgr.shape[1] == 0:
+                # Return zero vector for invalid crops
+                total_bins = sum(self.bins)
+                features.append(np.zeros(total_bins))
+                invalid_count += 1
+                continue
+
             # Apply torso-only cropping to focus on jersey colors
             if self.torso_only:
                 height = img_bgr.shape[0]
                 img_bgr = img_bgr[0:int(height/2), :]  # Upper 50% only
 
+                # Check again after torso cropping
+                if img_bgr.shape[0] == 0 or img_bgr.shape[1] == 0:
+                    total_bins = sum(self.bins)
+                    features.append(np.zeros(total_bins))
+                    invalid_count += 1
+                    continue
+
             # Extract color histogram
             feature = self.extract_color_histogram(img_bgr)
             features.append(feature)
+
+        # Print warning if invalid crops detected
+        if invalid_count > 0:
+            print(f"  ⚠️ Warning: {invalid_count}/{len(crops)} crops were empty/invalid (filled with zeros)")
 
         return np.array(features)
