@@ -14,13 +14,14 @@ class TrackerManager:
     Handles initialization and configuration of tracking models with advanced filtering.
     """
 
-    def __init__(self, match_thresh=0.5, track_buffer=120, min_box_area=10, aspect_ratio_thresh=1.6):
+    def __init__(self, match_thresh=0.5, track_buffer=300, min_box_area=10, aspect_ratio_thresh=1.6):
         """
         Initialize the tracker with configurable parameters.
 
         Args:
             match_thresh (float): Matching threshold for tracking (default: 0.5)
-            track_buffer (int): Number of frames to keep tracking buffer (default: 120)
+            track_buffer (int): Number of frames to keep tracking buffer (default: 300 = 12 seconds @ 25fps)
+                               Increased from 120 to handle goalkeepers being off-screen longer
             min_box_area (float): Minimum bounding box area to keep detection (default: 10)
             aspect_ratio_thresh (float): Maximum aspect ratio (h/w) for filtering vertical boxes (default: 1.6)
         """

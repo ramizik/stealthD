@@ -6,11 +6,13 @@ Handles re-identification when ByteTrack loses and re-acquires players.
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-import numpy as np
 from typing import Dict, List, Set, Tuple
+
+import numpy as np
 
 
 class TrackStitcher:
@@ -33,7 +35,7 @@ class TrackStitcher:
         self.max_position_distance = max_position_distance
 
     def _get_track_info(self, bytetrack_id: int, player_tracks: Dict,
-                        team_assignments: Dict) -> Dict:
+                        team_assignments: Dict, goalkeeper_metadata: Dict = None) -> Dict:
         """
         Extract information about a specific ByteTrack ID.
 
@@ -41,6 +43,7 @@ class TrackStitcher:
             bytetrack_id: ByteTrack ID to analyze
             player_tracks: Dictionary {frame_idx: {bytetrack_id: bbox}}
             team_assignments: Dictionary {frame_idx: {bytetrack_id: team_id}}
+            goalkeeper_metadata: Optional dictionary {frame_idx: {bytetrack_id: is_goalkeeper}}
 
         Returns:
             Dictionary with track statistics
@@ -48,6 +51,7 @@ class TrackStitcher:
         frames = []
         positions = []
         teams = []
+        goalkeeper_frames = 0  # Count frames where this ID is marked as goalkeeper
 
         for frame_idx in sorted(player_tracks.keys()):
             if bytetrack_id in player_tracks[frame_idx] and -1 not in player_tracks[frame_idx]:
@@ -62,6 +66,25 @@ class TrackStitcher:
                 if frame_idx in team_assignments and bytetrack_id in team_assignments[frame_idx]:
                     teams.append(team_assignments[frame_idx][bytetrack_id])
 
+                # Check goalkeeper status
+                if goalkeeper_metadata and frame_idx in goalkeeper_metadata:
+                    if bytetrack_id in goalkeeper_metadata[frame_idx]:
+                        if goalkeeper_metadata[frame_idx][bytetrack_id]:
+                            goalkeeper_frames += 1
+
+        # Determine if this is a goalkeeper track
+        # Strategy: Goalkeeper tracks are either:
+        # 1. Short fragments (<50 frames) with ANY goalkeeper frames (likely tracking breaks)
+        # 2. Longer tracks (>=50 frames) with >50% goalkeeper frames
+        is_goalkeeper = False
+        if frames and goalkeeper_frames > 0:
+            if len(frames) < 50:
+                # Short track with any GK frames - likely a goalkeeper fragment
+                is_goalkeeper = True
+            elif goalkeeper_frames > len(frames) * 0.5:
+                # Long track that's mostly goalkeeper
+                is_goalkeeper = True
+
         return {
             'frames': frames,
             'first_frame': frames[0] if frames else None,
@@ -70,7 +93,9 @@ class TrackStitcher:
             'last_position': positions[-1] if positions else None,
             'first_position': positions[0] if positions else None,
             'team': max(set(teams), key=teams.count) if teams else None,  # Most common team
-            'total_frames': len(frames)
+            'total_frames': len(frames),
+            'is_goalkeeper': is_goalkeeper,
+            'goalkeeper_frame_count': goalkeeper_frames
         }
 
     def _calculate_position_distance(self, pos1: Tuple[float, float],
@@ -79,15 +104,18 @@ class TrackStitcher:
         return np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
 
     def find_mergeable_tracks(self, player_tracks: Dict,
-                             team_assignments: Dict) -> Dict[int, int]:
+                             team_assignments: Dict,
+                             goalkeeper_metadata: Dict = None) -> Dict[int, int]:
         """
         Find tracks that should be merged (represent same player).
 
         Uses spatial continuity and team consistency to identify track fragments.
+        IMPORTANT: Goalkeepers are only merged with other goalkeepers, never with field players.
 
         Args:
             player_tracks: Dictionary {frame_idx: {bytetrack_id: bbox}}
             team_assignments: Dictionary {frame_idx: {bytetrack_id: team_id}}
+            goalkeeper_metadata: Optional dictionary {frame_idx: {bytetrack_id: is_goalkeeper}}
 
         Returns:
             Dictionary {old_bytetrack_id: new_bytetrack_id} for merging
@@ -101,7 +129,31 @@ class TrackStitcher:
         # Get info for each track
         track_infos = {}
         for track_id in all_ids:
-            track_infos[track_id] = self._get_track_info(track_id, player_tracks, team_assignments)
+            track_infos[track_id] = self._get_track_info(track_id, player_tracks, team_assignments, goalkeeper_metadata)
+
+        # Debug: Log goalkeeper metadata status
+        if goalkeeper_metadata:
+            total_gk_frames = sum(1 for frame_data in goalkeeper_metadata.values()
+                                 for is_gk in frame_data.values() if is_gk)
+            gk_ids_in_metadata = set()
+            for frame_data in goalkeeper_metadata.values():
+                for tid, is_gk in frame_data.items():
+                    if is_gk:
+                        gk_ids_in_metadata.add(tid)
+            print(f"  Track stitcher received goalkeeper metadata: {total_gk_frames} goalkeeper entries")
+            print(f"  ByteTrack IDs marked as goalkeepers in metadata: {sorted(gk_ids_in_metadata)}")
+        else:
+            print(f"  WARNING: No goalkeeper metadata provided to track stitcher")
+
+        # Log goalkeeper track detection
+        goalkeeper_tracks = {tid: info for tid, info in track_infos.items() if info['is_goalkeeper']}
+        if goalkeeper_tracks:
+            print(f"  Found {len(goalkeeper_tracks)} goalkeeper tracks after analysis: {sorted(goalkeeper_tracks.keys())}")
+            for tid, info in goalkeeper_tracks.items():
+                print(f"    Track {tid}: {info['goalkeeper_frame_count']}/{info['total_frames']} frames as GK ({info['goalkeeper_frame_count']/info['total_frames']*100:.1f}%)")
+        else:
+            print(f"  No goalkeeper tracks detected (all tracks are field players)")
+
 
         # Sort tracks by first appearance
         sorted_tracks = sorted(track_infos.items(), key=lambda x: x[1]['first_frame'] or float('inf'))
@@ -120,6 +172,10 @@ class TrackStitcher:
             for track_id_b, info_b in sorted_tracks[i+1:]:
                 if track_id_b in merge_map or track_id_b in used_ids:
                     continue
+
+                # CRITICAL: Never merge goalkeepers with field players
+                if info_a['is_goalkeeper'] != info_b['is_goalkeeper']:
+                    continue  # One is GK, one is field player - cannot be same person
 
                 # Check if B could be continuation of A
                 if info_a['last_frame'] is None or info_b['first_frame'] is None:
@@ -191,5 +247,7 @@ class TrackStitcher:
 
             merged_tracks[frame_idx] = merged_frame_tracks
             merged_teams[frame_idx] = merged_frame_teams
+
+        return merged_tracks, merged_teams
 
         return merged_tracks, merged_teams

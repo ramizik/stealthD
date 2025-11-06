@@ -34,19 +34,27 @@ class GoalkeeperAssigner:
         self,
         players: sv.Detections,
         goalkeepers: sv.Detections,
-        player_team_ids: np.ndarray
+        player_team_ids: np.ndarray,
+        frame_width: int = 1920
     ) -> np.ndarray:
         """
-        Assign goalkeepers to teams based on proximity to team centroids.
+        Assign goalkeepers to teams based on their position on the field.
 
-        Strategy:
-        1. Calculate centroid of each team's field players
-        2. Assign each goalkeeper to the closest team centroid
+        IMPROVED STRATEGY (position-based instead of centroid-based):
+        - Goalkeepers on LEFT half of frame (x < frame_width/2) → Team 0
+        - Goalkeepers on RIGHT half of frame (x > frame_width/2) → Team 1
+
+        This is more reliable than centroid-based assignment because:
+        1. Goalkeepers stay at their goal positions
+        2. Works even with few field players visible
+        3. Immune to field player clustering/positioning
+        4. Works with brief goalkeeper appearances
 
         Args:
             players: Field player detections
             goalkeepers: Goalkeeper detections
             player_team_ids: Team assignments for field players (0 or 1)
+            frame_width: Video frame width in pixels (default 1920)
 
         Returns:
             Team IDs for goalkeepers (0 or 1)
@@ -54,39 +62,20 @@ class GoalkeeperAssigner:
         if len(goalkeepers) == 0:
             return np.array([])
 
-        if len(players) == 0 or len(player_team_ids) == 0:
-            # No field players to compare against, default to team 0
-            return np.zeros(len(goalkeepers), dtype=int)
-
-        # Get bottom-center positions (feet)
+        # Get goalkeeper positions (bottom-center)
         goalkeeper_positions = goalkeepers.get_anchors_coordinates(
             sv.Position.BOTTOM_CENTER
         )
-        player_positions = players.get_anchors_coordinates(
-            sv.Position.BOTTOM_CENTER
-        )
 
-        # Calculate team centroids
-        team_0_mask = player_team_ids == 0
-        team_1_mask = player_team_ids == 1
-
-        # Handle edge cases where one team has no players
-        if team_0_mask.sum() == 0 and team_1_mask.sum() == 0:
-            return np.zeros(len(goalkeepers), dtype=int)
-        elif team_0_mask.sum() == 0:
-            return np.ones(len(goalkeepers), dtype=int)
-        elif team_1_mask.sum() == 0:
-            return np.zeros(len(goalkeepers), dtype=int)
-
-        team_0_centroid = player_positions[team_0_mask].mean(axis=0)
-        team_1_centroid = player_positions[team_1_mask].mean(axis=0)
-
-        # Assign each goalkeeper to closest team
+        # Assign teams based on x-position: left half = Team 0, right half = Team 1
         goalkeeper_team_ids = []
+        frame_center_x = frame_width / 2.0
+
         for gk_pos in goalkeeper_positions:
-            dist_0 = np.linalg.norm(gk_pos - team_0_centroid)
-            dist_1 = np.linalg.norm(gk_pos - team_1_centroid)
-            goalkeeper_team_ids.append(0 if dist_0 < dist_1 else 1)
+            x_pos = gk_pos[0]
+            # Left half of frame → Team 0, Right half → Team 1
+            team_id = 0 if x_pos < frame_center_x else 1
+            goalkeeper_team_ids.append(team_id)
 
         return np.array(goalkeeper_team_ids)
 

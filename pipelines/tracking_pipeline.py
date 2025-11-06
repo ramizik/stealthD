@@ -57,11 +57,39 @@ class TrackingPipeline:
         self.ball_interpolator = BallInterpolator()
         # Store goalkeeper tracker IDs detected across all frames
         self.goalkeeper_tracker_ids = set()
+        # Track last seen frame for each goalkeeper to clean up stale IDs
+        self.goalkeeper_last_seen = {}  # {tracker_id: frame_idx}
+        # Track goalkeeper candidates - must be detected multiple times before confirmation
+        self.goalkeeper_candidate_ids = {}  # {tracker_id: detection_count}
         # Track when we last ran goalkeeper detection
         self.last_gk_detection_frame = -1000  # Start with large negative to trigger first detection
         # Store video frame dimensions
         self.frame_width = None
         self.frame_height = None
+        # Goalkeeper logger for separate debug file
+        self.gk_logger = None
+
+    def set_goalkeeper_logger(self, gk_logger):
+        """
+        Set the goalkeeper logger for debug output.
+
+        Args:
+            gk_logger: GoalkeeperLogger instance
+        """
+        self.gk_logger = gk_logger
+        # Also set it on the annotator manager
+        if self.annotator_manager:
+            self.annotator_manager.set_goalkeeper_logger(gk_logger)
+
+    def _log_gk(self, message: str):
+        """
+        Log goalkeeper debug message to separate file if logger is set.
+
+        Args:
+            message: Message to log
+        """
+        if self.gk_logger:
+            self.gk_logger.log(message)
 
     def initialize_models(self):
         """Initialize all models required for the pipeline."""
@@ -308,38 +336,56 @@ class TrackingPipeline:
             print(f"\n[FRAME INFO] Video dimensions: {self.frame_width}x{self.frame_height}")
 
         if len(player_detections.xyxy) > 0:
-            # Periodically run goalkeeper detection (every 25 frames = ~1 second)
-            # More frequent checks to catch goalkeepers appearing at any time
-            GK_DETECTION_INTERVAL = 25
-            should_detect_gk = (frame_idx - self.last_gk_detection_frame) >= GK_DETECTION_INTERVAL
+            # Run goalkeeper detection EVERY frame to handle ByteTrack ID changes
+            # ByteTrack assigns new IDs when players leave/reenter frame, so we need
+            # continuous detection to catch goalkeepers with new tracker IDs
+            should_detect_gk = True  # Always run detection
 
             if should_detect_gk and player_detections.tracker_id is not None and len(player_detections) >= 3:
                 # Run spatial isolation detection with actual frame width
                 goalkeeper_mask, field_player_mask = self._identify_goalkeepers(
                     player_detections,
-                    frame_width_px=self.frame_width or 1920
+                    frame_width_px=self.frame_width or 1920,
+                    frame_idx=frame_idx
                 )
 
-                # Add any newly detected goalkeepers to our set
+                # Add detected goalkeepers to candidate list
+                # Only confirm as goalkeeper after multiple detections (minimum 3 frames)
+                CONFIRMATION_THRESHOLD = 3  # Must be detected 3+ times to be confirmed as goalkeeper
+
                 goalkeeper_indices = np.where(goalkeeper_mask)[0]
-                new_goalkeepers = []
+                new_confirmed_goalkeepers = []
+
                 for idx in goalkeeper_indices:
                     tracker_id = player_detections.tracker_id[idx]
-                    if tracker_id not in self.goalkeeper_tracker_ids:
-                        new_goalkeepers.append(tracker_id)
-                    self.goalkeeper_tracker_ids.add(tracker_id)
+
+                    # Increment candidate detection count
+                    if tracker_id not in self.goalkeeper_candidate_ids:
+                        self.goalkeeper_candidate_ids[tracker_id] = 1
+                    else:
+                        self.goalkeeper_candidate_ids[tracker_id] += 1
+
+                    # Confirm as goalkeeper if detected enough times
+                    if self.goalkeeper_candidate_ids[tracker_id] >= CONFIRMATION_THRESHOLD:
+                        if tracker_id not in self.goalkeeper_tracker_ids:
+                            new_confirmed_goalkeepers.append(tracker_id)
+                            self.goalkeeper_tracker_ids.add(tracker_id)
+
+                    # Update last seen frame regardless of confirmation status
+                    self.goalkeeper_last_seen[tracker_id] = frame_idx
 
                 # Log detection attempts for visibility
                 positions = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
                 x_positions = positions[:, 0]
 
-                if new_goalkeepers:
-                    print(f"\n[GK DETECTION] Frame {frame_idx}: Detected {len(new_goalkeepers)} new goalkeeper(s)")
-                    print(f"[GK DETECTION] New ByteTrack IDs: {sorted(new_goalkeepers)}")
+                # Only log when we confirm new goalkeepers
+                if new_confirmed_goalkeepers:
+                    self._log_gk(f"\n[GK DETECTION] Frame {frame_idx}: Confirmed {len(new_confirmed_goalkeepers)} new goalkeeper(s) (detected {CONFIRMATION_THRESHOLD}+ times)")
+                    self._log_gk(f"[GK DETECTION] New ByteTrack IDs: {sorted(new_confirmed_goalkeepers)}")
 
-                    # Show where each GK was detected with isolation info
+                    # Show where each GK was detected with isolation info AND edge distance
                     for idx in goalkeeper_indices:
-                        if player_detections.tracker_id[idx] in new_goalkeepers:
+                        if player_detections.tracker_id[idx] in new_confirmed_goalkeepers:
                             x_pos = positions[idx, 0]
                             y_pos = positions[idx, 1]
 
@@ -350,18 +396,41 @@ class TrackingPipeline:
                             else:
                                 distance_to_nearest = 0
 
+                            # Calculate distance from edge (using strict criteria)
                             edge_zone_left = self.frame_width * 0.10
                             edge_zone_right = self.frame_width * 0.90
-                            zone = "LEFT" if x_pos < edge_zone_left else "RIGHT"
-                            print(f"[GK DETECTION]   ID {player_detections.tracker_id[idx]}: x={x_pos:.0f}px (in {zone} edge zone), isolation={distance_to_nearest:.0f}px")
+                            distance_from_left_edge = x_pos
+                            distance_from_right_edge = self.frame_width - x_pos
 
-                    print(f"[GK DETECTION] Total known goalkeepers: {sorted(self.goalkeeper_tracker_ids)}")
-                    print(f"[GK DETECTION] Edge zones: <{self.frame_width * 0.10:.0f}px (LEFT) | >{self.frame_width * 0.90:.0f}px (RIGHT), min_isolation=150px")
-                elif frame_idx % 100 == 0:  # Only log "no GK" every 100 frames to reduce noise
-                    # Show why no GK was detected
-                    print(f"[GK SCAN] Frame {frame_idx}: No new goalkeepers (x range: {x_positions.min():.0f}-{x_positions.max():.0f}px)")
+                            zone = "LEFT" if x_pos < edge_zone_left else "RIGHT"
+                            edge_dist = distance_from_left_edge if zone == "LEFT" else distance_from_right_edge
+
+                            detection_count = self.goalkeeper_candidate_ids.get(player_detections.tracker_id[idx], 0)
+                            self._log_gk(f"[GK DETECTION]   ID {player_detections.tracker_id[idx]}: x={x_pos:.0f}px (in {zone} edge zone), edge_dist={edge_dist:.0f}px, isolation={distance_to_nearest:.0f}px, detections={detection_count}")
+
+                    self._log_gk(f"[GK DETECTION] Total confirmed goalkeepers: {sorted(self.goalkeeper_tracker_ids)}")
+                    self._log_gk(f"[GK DETECTION] Edge zones: <{self.frame_width * 0.10:.0f}px (LEFT) | >{self.frame_width * 0.90:.0f}px (RIGHT), max_edge_dist=150px, min_isolation=250px")
 
                 self.last_gk_detection_frame = frame_idx
+
+            # Clean up stale goalkeeper IDs (not seen for 300 frames = 12 seconds @ 25fps)
+            # This removes ByteTrack IDs that are no longer active
+            STALE_THRESHOLD = 300
+            stale_gk_ids = []
+            for gk_id in list(self.goalkeeper_tracker_ids):
+                last_seen = self.goalkeeper_last_seen.get(gk_id, -1)
+                if frame_idx - last_seen > STALE_THRESHOLD:
+                    stale_gk_ids.append(gk_id)
+
+            if stale_gk_ids:
+                for gk_id in stale_gk_ids:
+                    self.goalkeeper_tracker_ids.remove(gk_id)
+                    if gk_id in self.goalkeeper_last_seen:
+                        del self.goalkeeper_last_seen[gk_id]
+                    if gk_id in self.goalkeeper_candidate_ids:
+                        del self.goalkeeper_candidate_ids[gk_id]
+                self._log_gk(f"[GK CLEANUP] Frame {frame_idx}: Removed {len(stale_gk_ids)} stale goalkeeper IDs: {sorted(stale_gk_ids)}")
+                self._log_gk(f"[GK CLEANUP] Remaining active goalkeepers: {sorted(self.goalkeeper_tracker_ids)}")
 
             # Build goalkeeper mask from stored tracker IDs
             goalkeeper_mask = np.zeros(len(player_detections), dtype=bool)
@@ -369,7 +438,49 @@ class TrackingPipeline:
                 for i, tracker_id in enumerate(player_detections.tracker_id):
                     if tracker_id in self.goalkeeper_tracker_ids:
                         goalkeeper_mask[i] = True
+                        # Update last seen frame for currently visible goalkeepers
+                        self.goalkeeper_last_seen[tracker_id] = frame_idx
             field_player_mask = ~goalkeeper_mask
+
+            # DEBUG: Detailed tracking of goalkeeper visibility
+            if len(self.goalkeeper_tracker_ids) > 0:
+                # Track which known GKs are currently in frame
+                current_tracker_ids = set(player_detections.tracker_id) if player_detections.tracker_id is not None else set()
+                visible_gks = current_tracker_ids & self.goalkeeper_tracker_ids
+                missing_gks = self.goalkeeper_tracker_ids - current_tracker_ids
+
+                # Log every 50 frames for detailed tracking
+                if frame_idx % 50 == 0:
+                    positions = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+                    x_positions = positions[:, 0]
+
+                    self._log_gk(f"\n[GK DEBUG] Frame {frame_idx} - Goalkeeper Tracking Status:")
+                    self._log_gk(f"[GK DEBUG]   Known GK IDs: {sorted(self.goalkeeper_tracker_ids)}")
+                    self._log_gk(f"[GK DEBUG]   Currently visible GK IDs: {sorted(visible_gks) if visible_gks else 'NONE'}")
+                    self._log_gk(f"[GK DEBUG]   Missing GK IDs: {sorted(missing_gks) if missing_gks else 'none'}")
+                    self._log_gk(f"[GK DEBUG]   Total players detected: {len(player_detections)}")
+                    self._log_gk(f"[GK DEBUG]   All tracker IDs in frame: {sorted(player_detections.tracker_id)[:15]}...")
+                    self._log_gk(f"[GK DEBUG]   Player x-positions range: {x_positions.min():.0f} - {x_positions.max():.0f} px")
+
+                    # Show position of each visible goalkeeper
+                    if visible_gks:
+                        for i, tracker_id in enumerate(player_detections.tracker_id):
+                            if tracker_id in visible_gks:
+                                x_pos = positions[i, 0]
+                                y_pos = positions[i, 1]
+                                self._log_gk(f"[GK DEBUG]     GK ID {tracker_id}: position=({x_pos:.0f}, {y_pos:.0f})")
+
+                    # Show last seen info for missing goalkeepers
+                    if missing_gks:
+                        for gk_id in missing_gks:
+                            last_seen = self.goalkeeper_last_seen.get(gk_id, -1)
+                            frames_ago = frame_idx - last_seen
+                            self._log_gk(f"[GK DEBUG]     Missing GK ID {gk_id}: last seen {frames_ago} frames ago (frame {last_seen})")
+
+            # Periodic status logging (every 100 frames)
+            if frame_idx % 100 == 0 and len(self.goalkeeper_tracker_ids) > 0:
+                active_gk_ids = [tid for tid in player_detections.tracker_id if tid in self.goalkeeper_tracker_ids]
+                self._log_gk(f"[GK STATUS] Frame {frame_idx}: {len(active_gk_ids)}/{len(self.goalkeeper_tracker_ids)} known GKs currently visible (IDs: {sorted(active_gk_ids) if active_gk_ids else 'none'})")
 
             # Get field player and goalkeeper detections
             field_players = player_detections[field_player_mask]
@@ -400,13 +511,13 @@ class TrackingPipeline:
             else:
                 field_player_teams = np.array([])
 
-            # Assign teams to goalkeepers based on proximity to field player centroids
-            if len(goalkeepers) > 0 and len(field_players) > 0:
+            # Assign teams to goalkeepers based on their x-position (left/right)
+            if len(goalkeepers) > 0:
                 goalkeeper_teams = self.goalkeeper_assigner.assign_goalkeeper_teams(
-                    field_players, goalkeepers, field_player_teams
+                    field_players, goalkeepers, field_player_teams, frame_width=self.frame_width
                 )
             else:
-                goalkeeper_teams = np.zeros(len(goalkeepers), dtype=int) if len(goalkeepers) > 0 else np.array([])
+                goalkeeper_teams = np.array([])
 
             # Merge team assignments back into original detection order
             team_ids = np.zeros(len(player_detections), dtype=int)
@@ -430,18 +541,20 @@ class TrackingPipeline:
 
         return player_detections, assignment_time
 
-    def _identify_goalkeepers(self, player_detections, frame_width_px=1920):
+    def _identify_goalkeepers(self, player_detections, frame_width_px=1920, frame_idx=None):
         """
         Identify goalkeepers based on their position at the FRAME EDGES.
 
-        STRICT STRATEGY:
-        - Goalkeepers are at the EXTREME left/right edges (within 10% of frame width)
-        - Must be VERY isolated from other players (>15% of player spread AND >150px absolute)
-        - This ensures we only detect actual goalkeepers at goal positions, not defenders
+        ULTRA-STRICT STRATEGY (Updated to prevent false positives):
+        - Goalkeepers must be at EXTREME edges (within 5% of frame width)
+        - Must be VERY close to frame edge itself (within 100px of 0 or frame_width)
+        - Must be HEAVILY isolated from other players (>250px absolute minimum)
+        - This ensures we only detect actual goalkeepers at goal positions, not field players
 
         Args:
             player_detections: All player detections
             frame_width_px: Actual video frame width in pixels (default 1920)
+            frame_idx: Current frame index for debug logging (optional)
 
         Returns:
             Tuple of (goalkeeper_mask, field_player_mask) as boolean numpy arrays
@@ -453,24 +566,40 @@ class TrackingPipeline:
         # Get bottom-center positions (feet)
         positions = player_detections.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
         x_positions = positions[:, 0]
+        y_positions = positions[:, 1]
 
-        # Define STRICT edge zones (10% from edges - only extreme edges)
-        EDGE_ZONE_PERCENT = 0.10
-        left_edge_threshold = frame_width_px * EDGE_ZONE_PERCENT  # e.g., 192px for 1920px
-        right_edge_threshold = frame_width_px * (1 - EDGE_ZONE_PERCENT)  # e.g., 1728px
+        # Define goalkeeper edge zones - STRICT to prevent false positives
+        # 10% from edges = 192px zones for 1920px frame (goalkeepers near goal posts)
+        EDGE_ZONE_PERCENT = 0.10  # 10% from edges (strict)
+        left_edge_threshold = frame_width_px * EDGE_ZONE_PERCENT
+        right_edge_threshold = frame_width_px * (1 - EDGE_ZONE_PERCENT)
+
+        # Vertical constraint: Exclude players at extreme top/bottom of frame
+        # These are typically referees/staff standing outside the field
+        # Assume 1080p video - goalkeepers should be in middle 80% vertically
+        VERTICAL_MARGIN = 0.10  # Exclude top/bottom 10% of frame
+        frame_height = 1080  # Standard 1080p
+        y_min_threshold = frame_height * VERTICAL_MARGIN
+        y_max_threshold = frame_height * (1 - VERTICAL_MARGIN)
+
+        # Additional requirement: must be close to actual frame edge
+        # 100px max distance ensures we only catch goalkeepers AT the goal line
+        # Referees/staff standing 150px+ from edge will be excluded
+        MAX_DISTANCE_FROM_EDGE = 100  # Very strict - must be at goal line
 
         # Find players in edge zones
         in_left_zone = x_positions < left_edge_threshold
         in_right_zone = x_positions > right_edge_threshold
 
-        # STRICT isolation requirement:
-        # 1. Must be >15% of player spread from nearest neighbor
-        # 2. Must be >150px absolute distance (to avoid detecting defenders)
+        # Isolation requirement - ADAPTIVE with cap for active play scenarios
+        # Use relative isolation but cap it to handle field players near goal
         x_min, x_max = x_positions.min(), x_positions.max()
         player_spread = x_max - x_min
-        relative_isolation = 0.15 * player_spread if player_spread > 100 else 100
-        MIN_ABSOLUTE_ISOLATION = 150  # Minimum 150px gap required
-        isolation_threshold = max(relative_isolation, MIN_ABSOLUTE_ISOLATION)
+        relative_isolation = 0.10 * player_spread if player_spread > 100 else 100  # Reduced from 0.15 to 0.10
+        MIN_ABSOLUTE_ISOLATION = 120  # Minimum isolation threshold
+        MAX_ABSOLUTE_ISOLATION = 180  # Maximum cap - prevents overly strict requirements
+        # Cap the isolation threshold to prevent it from becoming too strict
+        isolation_threshold = min(max(relative_isolation, MIN_ABSOLUTE_ISOLATION), MAX_ABSOLUTE_ISOLATION)
 
         goalkeeper_indices = []
 
@@ -479,26 +608,82 @@ class TrackingPipeline:
             left_zone_indices = np.where(in_left_zone)[0]
             # Take leftmost player in left zone
             leftmost_idx = left_zone_indices[np.argmin(x_positions[left_zone_indices])]
+            leftmost_x = x_positions[leftmost_idx]
+            leftmost_y = y_positions[leftmost_idx]
 
-            # Check if this player is isolated from others
-            other_positions = np.delete(x_positions, leftmost_idx)
-            if len(other_positions) > 0:
-                distance_to_nearest = np.min(np.abs(other_positions - x_positions[leftmost_idx]))
-                if distance_to_nearest > isolation_threshold:
-                    goalkeeper_indices.append(leftmost_idx)
+            # ADDITIONAL CHECK: Must be very close to left edge (within 150px of x=0)
+            distance_from_left_edge = leftmost_x
+
+            # VERTICAL CHECK: Must be within central vertical area (not at extreme top/bottom)
+            is_in_vertical_bounds = (leftmost_y >= y_min_threshold and leftmost_y <= y_max_threshold)
+
+            # CONTEXT-AWARE ISOLATION: Relax isolation requirement for players VERY close to edge
+            # If player is within 90px of edge (at goal line), use relaxed 80px isolation
+            if distance_from_left_edge <= 90:
+                effective_isolation_threshold_left = 80  # Relaxed for players at goal line
+            else:
+                effective_isolation_threshold_left = isolation_threshold  # Standard requirement
+
+            if distance_from_left_edge <= MAX_DISTANCE_FROM_EDGE and is_in_vertical_bounds:
+                # Check if this player is isolated from others
+                other_positions = np.delete(x_positions, leftmost_idx)
+                if len(other_positions) > 0:
+                    distance_to_nearest = np.min(np.abs(other_positions - leftmost_x))
+                    if distance_to_nearest > effective_isolation_threshold_left:
+                        goalkeeper_indices.append(leftmost_idx)
 
         # Check for isolated player in RIGHT zone
         if np.any(in_right_zone):
             right_zone_indices = np.where(in_right_zone)[0]
             # Take rightmost player in right zone
             rightmost_idx = right_zone_indices[np.argmax(x_positions[right_zone_indices])]
+            rightmost_x = x_positions[rightmost_idx]
+            rightmost_y = y_positions[rightmost_idx]
 
-            # Check if this player is isolated from others
+            # ADDITIONAL CHECK: Must be very close to right edge (within 150px of frame_width)
+            distance_from_right_edge = frame_width_px - rightmost_x
+
+            # VERTICAL CHECK: Must be within central vertical area (not at extreme top/bottom)
+            is_in_vertical_bounds = (rightmost_y >= y_min_threshold and rightmost_y <= y_max_threshold)
+
+            # Calculate isolation for debugging
             other_positions = np.delete(x_positions, rightmost_idx)
-            if len(other_positions) > 0:
-                distance_to_nearest = np.min(np.abs(other_positions - x_positions[rightmost_idx]))
-                if distance_to_nearest > isolation_threshold:
-                    goalkeeper_indices.append(rightmost_idx)
+            distance_to_nearest = np.min(np.abs(other_positions - rightmost_x)) if len(other_positions) > 0 else 0
+
+            # CONTEXT-AWARE ISOLATION: Relax isolation requirement for players VERY close to edge
+            # If player is within 90px of edge (at goal line), use relaxed 80px isolation
+            # This handles cases where attacking players are near goalkeeper during goal attempts
+            if distance_from_right_edge <= 90:
+                effective_isolation_threshold = 80  # Relaxed for players at goal line
+            else:
+                effective_isolation_threshold = isolation_threshold  # Standard requirement
+
+            # Debug rejected candidates (log every 50 frames when player in right zone is rejected)
+            rejected = False
+            reject_reason = None
+            if distance_from_right_edge > MAX_DISTANCE_FROM_EDGE:
+                rejected = True
+                reject_reason = f"edge_dist={distance_from_right_edge:.0f}px > {MAX_DISTANCE_FROM_EDGE}px"
+            elif not is_in_vertical_bounds:
+                rejected = True
+                reject_reason = f"y={rightmost_y:.0f}px out of bounds [{y_min_threshold:.0f}, {y_max_threshold:.0f}]"
+            elif distance_to_nearest <= effective_isolation_threshold:
+                rejected = True
+                reject_reason = f"isolation={distance_to_nearest:.0f}px <= {effective_isolation_threshold:.0f}px (edge_dist={distance_from_right_edge:.0f}px)"
+
+            # Log rejection (only every 50 frames to avoid spam, or if tracker_id available)
+            if rejected and hasattr(player_detections, 'tracker_id') and player_detections.tracker_id is not None:
+                tracker_id = player_detections.tracker_id[rightmost_idx]
+                # Log for specific tracking IDs or periodically
+                if frame_idx is not None and (frame_idx % 50 == 0 or tracker_id in [37, 42, 43, 58, 73]):  # IDs seen in logs
+                    if hasattr(self, 'gk_logger') and self.gk_logger:
+                        self.gk_logger.log(f"[GK REJECT] Frame {frame_idx}: RIGHT zone candidate REJECTED - ID {tracker_id}, x={rightmost_x:.0f}px, y={rightmost_y:.0f}px, {reject_reason}")
+
+            if distance_from_right_edge <= MAX_DISTANCE_FROM_EDGE and is_in_vertical_bounds:
+                # Check if this player is isolated from others
+                if len(other_positions) > 0:
+                    if distance_to_nearest > effective_isolation_threshold:
+                        goalkeeper_indices.append(rightmost_idx)
 
         # Create masks
         goalkeeper_mask = np.zeros(len(player_detections), dtype=bool)
@@ -529,6 +714,13 @@ class TrackingPipeline:
             if hasattr(player_detections, 'data') and player_detections.data is not None:
                 is_goalkeeper = player_detections.data.get('is_goalkeeper', None)
 
+            # DEBUG: Track goalkeeper data storage
+            if is_goalkeeper is not None and index % 100 == 0:
+                gk_count = np.sum(is_goalkeeper)
+                if gk_count > 0:
+                    gk_ids = [player_detections.tracker_id[i] for i in range(len(is_goalkeeper)) if is_goalkeeper[i]]
+                    self._log_gk(f"[GK STORAGE DEBUG] Frame {index}: Storing {gk_count} goalkeeper(s) with IDs: {gk_ids}")
+
             for i, (tracker_id, bbox, class_id) in enumerate(zip(player_detections.tracker_id, player_detections.xyxy, player_detections.class_id)):
                 if index not in tracks['player']:
                     tracks['player'][index] = {}
@@ -546,6 +738,9 @@ class TrackingPipeline:
                     tracks['player_is_goalkeeper'][index] = {}
                 if is_goalkeeper is not None:
                     tracks['player_is_goalkeeper'][index][tracker_id] = bool(is_goalkeeper[i])
+                    # DEBUG: Log individual goalkeeper storage
+                    if is_goalkeeper[i] and index % 100 == 0:
+                        self._log_gk(f"[GK STORAGE DEBUG]   Stored GK status for ID {tracker_id}: {bool(is_goalkeeper[i])}")
                 else:
                     tracks['player_is_goalkeeper'][index][tracker_id] = False
         else:

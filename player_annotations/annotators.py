@@ -27,6 +27,28 @@ class AnnotatorManager:
         self.vertex_annotator = sv.VertexAnnotator(color=sv.Color.GREEN, radius=8)
         self.edge_annotator = sv.EdgeAnnotator(color=sv.Color.BLUE, thickness=3, edges=edges)
 
+        # Goalkeeper logger for separate debug file
+        self.gk_logger = None
+
+    def set_goalkeeper_logger(self, gk_logger):
+        """
+        Set the goalkeeper logger for debug output.
+
+        Args:
+            gk_logger: GoalkeeperLogger instance
+        """
+        self.gk_logger = gk_logger
+
+    def _log_gk(self, message: str):
+        """
+        Log goalkeeper debug message to separate file if logger is set.
+
+        Args:
+            message: Message to log
+        """
+        if self.gk_logger:
+            self.gk_logger.log(message)
+
     def annotate_players(self, frame: np.ndarray, player_detections: sv.Detections) -> np.ndarray:
         """
         Annotate only players on the frame with goalkeeper indicators.
@@ -51,17 +73,18 @@ class AnnotatorManager:
             # Try to get frame index from call stack
             self._debug_frame_count = getattr(self, '_debug_frame_count', 0)
             if self._debug_frame_count == 150:
-                print(f"[FRAME 150 DEBUG] Total players to annotate: {len(player_detections.tracker_id)}")
-                print(f"[FRAME 150 DEBUG] Tracker IDs: {sorted(player_detections.tracker_id)}")
+                self._log_gk(f"[FRAME 150 DEBUG] Total players to annotate: {len(player_detections.tracker_id)}")
+                self._log_gk(f"[FRAME 150 DEBUG] Tracker IDs: {sorted(player_detections.tracker_id)}")
                 if hasattr(player_detections, 'data') and player_detections.data and 'is_goalkeeper' in player_detections.data:
                     gk_mask = player_detections.data['is_goalkeeper']
                     gk_ids = player_detections.tracker_id[gk_mask]
-                    print(f"[FRAME 150 DEBUG] Goalkeeper IDs: {gk_ids}")
+                    self._log_gk(f"[FRAME 150 DEBUG] Goalkeeper IDs: {gk_ids}")
                 self._frame_150_debug = True
             self._debug_frame_count += 1
 
         # Create labels with GK indicator if available
         player_labels = []
+        gk_count_in_frame = 0
         for i, tracker_id in enumerate(player_detections.tracker_id):
             label = f'#{tracker_id}'
             # Check if this player is marked as goalkeeper (using custom data if available)
@@ -71,12 +94,29 @@ class AnnotatorManager:
                     if player_detections.data['is_goalkeeper'][i]:
                         label = f'GK#{tracker_id}'  # Mark as goalkeeper
                         is_gk = True
+                        gk_count_in_frame += 1
             player_labels.append(label)
 
-            # Debug: Print first few goalkeeper labels
-            if is_gk and not hasattr(self, '_gk_label_debug'):
-                print(f"[ANNOTATION DEBUG] Goalkeeper label created: '{label}' for tracker_id={tracker_id}")
-                self._gk_label_debug = True
+        # DEBUG: Log goalkeeper annotation every 50 frames
+        if not hasattr(self, '_annotation_frame_counter'):
+            self._annotation_frame_counter = 0
+
+        if self._annotation_frame_counter % 50 == 0:
+            has_gk_data = (hasattr(player_detections, 'data') and
+                          player_detections.data is not None and
+                          'is_goalkeeper' in player_detections.data)
+
+            if has_gk_data:
+                gk_mask = player_detections.data['is_goalkeeper']
+                gk_ids = [player_detections.tracker_id[i] for i in range(len(gk_mask)) if gk_mask[i]]
+                self._log_gk(f"[ANNOTATION DEBUG] Frame {self._annotation_frame_counter}: Found {len(gk_ids)} GK(s) to annotate: {gk_ids}")
+                if len(gk_ids) == 0 and len(player_detections) > 0:
+                    self._log_gk(f"[ANNOTATION DEBUG]   WARNING: No GKs in data but {len(player_detections)} players detected")
+                    self._log_gk(f"[ANNOTATION DEBUG]   All tracker IDs: {sorted(player_detections.tracker_id)[:10]}...")
+            else:
+                self._log_gk(f"[ANNOTATION DEBUG] Frame {self._annotation_frame_counter}: No goalkeeper data in detections")
+
+        self._annotation_frame_counter += 1
 
         frame = self.ellipse_annotator.annotate(frame, player_detections)
         frame = self.label_annotator.annotate(frame, detections=player_detections, labels=player_labels)
@@ -253,6 +293,28 @@ class AnnotatorManager:
                 # Use .get() with default False for tracker IDs not in goalkeeper dict
                 goalkeeper_mask = np.array([player_is_goalkeeper.get(tracker_id, False) for tracker_id in player_tracks.keys()])
                 player_detections.data = {'is_goalkeeper': goalkeeper_mask}
+
+                # DEBUG: Log goalkeeper data restoration
+                if not hasattr(self, '_gk_restore_debug_counter'):
+                    self._gk_restore_debug_counter = 0
+
+                if self._gk_restore_debug_counter % 100 == 0:
+                    gk_count = np.sum(goalkeeper_mask)
+                    if gk_count > 0:
+                        gk_ids = [list(player_tracks.keys())[i] for i in range(len(goalkeeper_mask)) if goalkeeper_mask[i]]
+                        self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: Restored {gk_count} goalkeeper(s): {gk_ids}")
+                        self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
+                    else:
+                        self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: No goalkeepers in this frame")
+                        self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
+                        self._log_gk(f"[RESTORE DEBUG]   tracker IDs in frame: {list(player_tracks.keys())}")
+
+                self._gk_restore_debug_counter += 1
+            else:
+                # DEBUG: Log when no goalkeeper data is provided
+                if not hasattr(self, '_no_gk_data_logged'):
+                    print(f"[RESTORE DEBUG] WARNING: No goalkeeper metadata provided for frame")
+                    self._no_gk_data_logged = True
         else:
             player_detections = None
 

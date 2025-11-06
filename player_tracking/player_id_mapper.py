@@ -66,6 +66,12 @@ class PlayerIDMapper:
             if self.goalkeeper_bytetrack_ids:
                 print(f"  Found {len(self.goalkeeper_bytetrack_ids)} goalkeeper(s) in ByteTrack IDs: {sorted(self.goalkeeper_bytetrack_ids)}")
 
+                # Deduplicate goalkeepers: Keep only the most persistent ID per goalkeeper position
+                # Multiple ByteTrack IDs may refer to the same goalkeeper due to tracking breaks
+                if len(self.goalkeeper_bytetrack_ids) > 2:
+                    print(f"  Note: {len(self.goalkeeper_bytetrack_ids)} GK IDs detected (likely tracking duplicates). Will prioritize by persistence.")
+
+
         # Collect statistics for each ByteTrack ID
         for frame_idx, frame_tracks in player_tracks.items():
             if -1 in frame_tracks:
@@ -122,42 +128,102 @@ class PlayerIDMapper:
 
         # Sort by goalkeeper status (GKs first), then total frames (descending)
         # This ensures goalkeepers ALWAYS get mapped, followed by most visible players
+        # Note: Multiple GK IDs may exist due to tracking breaks - sort ensures most persistent wins
         team0_tracks.sort(key=lambda x: (-x['is_goalkeeper'], -x['total_frames'], x['first_frame']))
         team1_tracks.sort(key=lambda x: (-x['is_goalkeeper'], -x['total_frames'], x['first_frame']))
 
         # Assign fixed IDs for Team 0 (1-11) - goalkeeper first, then top field players
         team0_mapped = 0
-        for i, track_info in enumerate(team0_tracks[:11]):  # Top 11 by priority (GK + presence)
-            fixed_id = self.TEAM_0_MIN + i
+        team0_gk_fixed_id = None  # Track the fixed ID assigned to team 0 goalkeeper
+        for i, track_info in enumerate(team0_tracks):
+            if team0_mapped >= 11:
+                break
+
+            # Map ALL goalkeeper ByteTrack IDs to the SAME fixed ID
+            # (Multiple ByteTrack IDs may represent same goalkeeper due to tracking breaks)
+            if track_info['is_goalkeeper']:
+                if team0_gk_fixed_id is None:
+                    # First goalkeeper - assign a new fixed ID
+                    team0_gk_fixed_id = self.TEAM_0_MIN + team0_mapped
+                    team0_mapped += 1
+                # Map this ByteTrack ID to the goalkeeper's fixed ID
+                self.bytetrack_to_fixed[track_info['bytetrack_id']] = team0_gk_fixed_id
+                # Keep first ByteTrack ID in reverse mapping (for consistency)
+                if team0_gk_fixed_id not in self.fixed_to_bytetrack:
+                    self.fixed_to_bytetrack[team0_gk_fixed_id] = track_info['bytetrack_id']
+                continue  # Don't increment team0_mapped again
+
+            fixed_id = self.TEAM_0_MIN + team0_mapped
             self.bytetrack_to_fixed[track_info['bytetrack_id']] = fixed_id
             self.fixed_to_bytetrack[fixed_id] = track_info['bytetrack_id']
-            self.next_team0_id = max(self.next_team0_id, fixed_id + 1)
             team0_mapped += 1
 
         # Assign fixed IDs for Team 1 (12-22) - goalkeeper first, then top field players
         team1_mapped = 0
-        for i, track_info in enumerate(team1_tracks[:11]):  # Top 11 by priority (GK + presence)
-            fixed_id = self.TEAM_1_MIN + i
+        team1_gk_fixed_id = None  # Track the fixed ID assigned to team 1 goalkeeper
+        for i, track_info in enumerate(team1_tracks):
+            if team1_mapped >= 11:
+                break
+
+            # Map ALL goalkeeper ByteTrack IDs to the SAME fixed ID
+            # (Multiple ByteTrack IDs may represent same goalkeeper due to tracking breaks)
+            if track_info['is_goalkeeper']:
+                if team1_gk_fixed_id is None:
+                    # First goalkeeper - assign a new fixed ID
+                    team1_gk_fixed_id = self.TEAM_1_MIN + team1_mapped
+                    team1_mapped += 1
+                # Map this ByteTrack ID to the goalkeeper's fixed ID
+                self.bytetrack_to_fixed[track_info['bytetrack_id']] = team1_gk_fixed_id
+                # Keep first ByteTrack ID in reverse mapping (for consistency)
+                if team1_gk_fixed_id not in self.fixed_to_bytetrack:
+                    self.fixed_to_bytetrack[team1_gk_fixed_id] = track_info['bytetrack_id']
+                self.next_team1_id = max(self.next_team1_id, team1_gk_fixed_id + 1)
+                continue  # Don't increment team1_mapped again
+
+            fixed_id = self.TEAM_1_MIN + team1_mapped
             self.bytetrack_to_fixed[track_info['bytetrack_id']] = fixed_id
             self.fixed_to_bytetrack[fixed_id] = track_info['bytetrack_id']
             self.next_team1_id = max(self.next_team1_id, fixed_id + 1)
             team1_mapped += 1
 
+        # Count goalkeepers for reporting
+        team0_gk_count = 1 if team0_gk_fixed_id is not None else 0
+        team1_gk_count = 1 if team1_gk_fixed_id is not None else 0
+
         total_mapped = len(self.bytetrack_to_fixed)
         print(f"ID Mapping complete: {total_mapped} players mapped to fixed IDs 1-22")
-        print(f"  Team 0: {team0_mapped} players (IDs 1-{team0_mapped})")
-        print(f"  Team 1: {team1_mapped} players (IDs 12-{11 + team1_mapped})")
+        print(f"  Team 0: {team0_mapped} players (IDs 1-{team0_mapped}) [{team0_gk_count} GK]")
+        print(f"  Team 1: {team1_mapped} players (IDs 12-{11 + team1_mapped}) [{team1_gk_count} GK]")
 
         # Report goalkeeper mappings
         if self.goalkeeper_bytetrack_ids:
             gk_mappings = []
-            for bytetrack_id in self.goalkeeper_bytetrack_ids:
+            gk_mapped_count = 0
+            gk_fixed_ids_seen = set()
+
+            for bytetrack_id in sorted(self.goalkeeper_bytetrack_ids):
+                # Skip if this GK ID was filtered out (not in track_statistics)
+                if bytetrack_id not in self.track_statistics:
+                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→FILTERED (no tracks)")
+                    continue
+
                 if bytetrack_id in self.bytetrack_to_fixed:
                     fixed_id = self.bytetrack_to_fixed[bytetrack_id]
-                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→Fixed#{fixed_id}")
+                    # Get frame count for this GK
+                    frames = self.track_statistics[bytetrack_id]['total_frames']
+
+                    # Check if this fixed ID was already seen (means multiple ByteTrack IDs merged)
+                    if fixed_id in gk_fixed_ids_seen:
+                        gk_mappings.append(f"ByteTrack#{bytetrack_id}→Fixed#{fixed_id} ({frames}fr, merged)")
+                    else:
+                        gk_mappings.append(f"ByteTrack#{bytetrack_id}→Fixed#{fixed_id} ({frames}fr)")
+                        gk_fixed_ids_seen.add(fixed_id)
+
+                    gk_mapped_count += 1
                 else:
-                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→UNMAPPED")
-            print(f"  Goalkeeper ID mappings: {', '.join(gk_mappings)}")
+                    frames = self.track_statistics[bytetrack_id]['total_frames']
+                    gk_mappings.append(f"ByteTrack#{bytetrack_id}→SKIPPED ({frames}fr, duplicate)")
+            print(f"  Goalkeeper ID mappings ({gk_mapped_count}/{len(self.goalkeeper_bytetrack_ids)} mapped): {', '.join(gk_mappings)}")
 
         # Report unmapped tracks (likely tracking artifacts or brief appearances)
         total_tracks = len(team0_tracks) + len(team1_tracks)

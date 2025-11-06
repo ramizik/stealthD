@@ -20,7 +20,8 @@ from constants import GPU_DEVICE, REQUIRE_GPU, model_path, test_video
 from keypoint_detection.keypoint_constants import keypoint_model_path
 from pipelines import (DetectionPipeline, KeypointPipeline, ProcessingPipeline,
                        TrackingPipeline)
-from utils.logger import DualLogger, create_log_path
+from utils.logger import (DualLogger, GoalkeeperLogger,
+                          create_goalkeeper_log_path, create_log_path)
 
 
 class CompleteSoccerAnalysisPipeline:
@@ -135,6 +136,14 @@ class CompleteSoccerAnalysisPipeline:
         # Check for cached frame processing data
         cache_path = cache_dir / f"{video_path_obj.stem}_frame_cache.pkl"
 
+        # Initialize goalkeeper debug logger
+        gk_log_path = create_goalkeeper_log_path(video_path, output_suffix)
+        gk_logger = GoalkeeperLogger.initialize(str(gk_log_path))
+        print(f"📝 Goalkeeper debug logging to: {gk_log_path.name}")
+
+        # Set goalkeeper logger in tracking pipeline
+        self.tracking_pipeline.set_goalkeeper_logger(gk_logger)
+
         # Step 4: Process all frames with detections, tracking, and team assignment
         print("\n[Step 4/8] Processing frames with detections and tracking...")
 
@@ -226,7 +235,13 @@ class CompleteSoccerAnalysisPipeline:
         from player_tracking import TrackStitcher
 
         track_stitcher = TrackStitcher(max_gap_frames=150, max_position_distance=200)
-        merge_map = track_stitcher.find_mergeable_tracks(all_tracks['player'], all_tracks['player_classids'])
+        # Pass goalkeeper metadata to prevent goalkeepers from being stitched with field players
+        goalkeeper_metadata = all_tracks.get('player_is_goalkeeper', None)
+        merge_map = track_stitcher.find_mergeable_tracks(
+            all_tracks['player'],
+            all_tracks['player_classids'],
+            goalkeeper_metadata
+        )
 
         if merge_map:
             print(f"  Found {len(merge_map)} track fragments to merge")
@@ -235,6 +250,27 @@ class CompleteSoccerAnalysisPipeline:
                 all_tracks['player_classids'],
                 merge_map
             )
+
+            # Also merge goalkeeper metadata for stitched tracks
+            if 'player_is_goalkeeper' in all_tracks:
+                print(f"  Merging goalkeeper metadata for stitched tracks...")
+                # Apply the same ID remapping to goalkeeper metadata
+                merged_goalkeeper = {}
+                for frame_idx, frame_goalkeepers in all_tracks['player_is_goalkeeper'].items():
+                    merged_frame = {}
+                    for bytetrack_id, is_gk in frame_goalkeepers.items():
+                        # Use main ID if this ID was merged
+                        main_id = merge_map.get(bytetrack_id, bytetrack_id)
+                        # If multiple fragments merge to same main_id, keep goalkeeper=True if any was True
+                        if main_id in merged_frame:
+                            merged_frame[main_id] = merged_frame[main_id] or is_gk
+                        else:
+                            merged_frame[main_id] = is_gk
+                    merged_goalkeeper[frame_idx] = merged_frame
+
+                all_tracks['player_is_goalkeeper'] = merged_goalkeeper
+                print(f"  Goalkeeper metadata remapped for track stitching")
+
             print(f"  Track stitching complete: {len(merge_map)} fragments merged")
         else:
             print(f"  No track fragments found - tracking is continuous")
@@ -257,27 +293,50 @@ class CompleteSoccerAnalysisPipeline:
         if 'player_is_goalkeeper' in all_tracks:
             # First, identify which fixed IDs are goalkeepers
             goalkeeper_fixed_ids = set()
+            bytetrack_gk_mapping = {}  # Track which ByteTrack IDs mapped to which fixed IDs
+
             for frame_idx, frame_goalkeepers in all_tracks['player_is_goalkeeper'].items():
                 for old_id, is_gk in frame_goalkeepers.items():
                     if is_gk:
                         # Map old ByteTrack ID to new fixed ID
-                        new_id = id_mapper.bytetrack_to_fixed.get(old_id, old_id)
-                        goalkeeper_fixed_ids.add(new_id)
+                        # Skip if this ByteTrack ID was filtered (not in mapping)
+                        if old_id in id_mapper.bytetrack_to_fixed:
+                            new_id = id_mapper.bytetrack_to_fixed[old_id]
+                            goalkeeper_fixed_ids.add(new_id)
+                            bytetrack_gk_mapping[old_id] = new_id
+                        else:
+                            gk_logger.log(f"[GK MAPPING WARNING] ByteTrack GK ID {old_id} not in fixed ID mapping!")
 
-            # Print goalkeeper ID mapping
+            # Print goalkeeper ID mapping with details
             if goalkeeper_fixed_ids:
                 print(f"\n[GK ID MAPPING DEBUG] Goalkeeper fixed IDs: {sorted(goalkeeper_fixed_ids)}")
+                gk_logger.log(f"[GK ID MAPPING] Goalkeeper fixed IDs: {sorted(goalkeeper_fixed_ids)}")
+                gk_logger.log(f"[GK ID MAPPING] ByteTrack→Fixed mapping: {bytetrack_gk_mapping}")
 
             # Now propagate goalkeeper status to ALL frames where these players appear
             remapped_goalkeeper = {}
+            gk_frame_count = {gk_id: 0 for gk_id in goalkeeper_fixed_ids}
+
             for frame_idx, frame_players in all_tracks['player'].items():
                 remapped_goalkeeper[frame_idx] = {}
                 for player_id in frame_players.keys():
                     # Mark as goalkeeper if this player ID is a goalkeeper
-                    remapped_goalkeeper[frame_idx][player_id] = (player_id in goalkeeper_fixed_ids)
+                    is_gk = (player_id in goalkeeper_fixed_ids)
+                    remapped_goalkeeper[frame_idx][player_id] = is_gk
+                    if is_gk:
+                        gk_frame_count[player_id] += 1
 
             all_tracks['player_is_goalkeeper'] = remapped_goalkeeper
-            print(f"[GK DEBUG] Goalkeeper status propagated to all {len(remapped_goalkeeper)} frames")
+            gk_logger.log(f"[GK PROPAGATION] Goalkeeper status propagated to all {len(remapped_goalkeeper)} frames")
+            gk_logger.log(f"[GK PROPAGATION] Goalkeeper frame counts: {gk_frame_count}")
+
+            # Debug: Show which frames have each goalkeeper
+            for gk_id in sorted(goalkeeper_fixed_ids):
+                frames_with_gk = [f for f, players in all_tracks['player'].items() if gk_id in players]
+                if frames_with_gk:
+                    gk_logger.log(f"[GK FRAMES] GK ID {gk_id} appears in {len(frames_with_gk)} frames: {frames_with_gk[:10]}{'...' if len(frames_with_gk) > 10 else ''}")
+                else:
+                    gk_logger.log(f"[GK WARNING] GK ID {gk_id} marked as goalkeeper but NEVER appears in player tracks!")
 
         # Store mapping info for JSON output
         id_mapping_info = id_mapper.get_mapping_summary()
@@ -418,6 +477,10 @@ class CompleteSoccerAnalysisPipeline:
         with open(llm_json_path, 'w') as f:
             json.dump(llm_data, f, indent=2)
         print(f"LLM-ready compact data saved to: {llm_json_path}")
+
+        # Close goalkeeper logger
+        if gk_logger:
+            gk_logger.close()
 
         return output_path, json_output_path, llm_json_path
 
