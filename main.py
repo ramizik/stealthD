@@ -721,24 +721,31 @@ class CompleteSoccerAnalysisPipeline:
 
         return all_tracks, global_mapper
 
-    def _visualize_keypoints(self, frame: np.ndarray, keypoints: np.ndarray,
+    def _visualize_keypoints(self, frame: np.ndarray, keypoints: 'sv.KeyPoints',
                             frame_idx: int, output_dir: Path):
         """Visualize detected keypoints on a frame and save debug image.
 
         Args:
             frame: Frame to annotate
-            keypoints: Detected keypoints (N, 32, 3) array
+            keypoints: sv.KeyPoints object from sv.KeyPoints.from_ultralytics()
             frame_idx: Frame index
             output_dir: Directory to save visualization
         """
         from keypoint_detection.keypoint_constants import (
             KEYPOINT_CONNECTIONS, KEYPOINT_NAMES)
 
-        if keypoints.shape[0] == 0:
+        if len(keypoints) == 0:
             return
 
-        # Get first detection
-        kpts = keypoints[0]  # (32, 3)
+        # Get keypoint coordinates and confidence from sv.KeyPoints
+        kpts_xy = keypoints.xy[0]  # (32, 2) - (x, y) coordinates
+        if hasattr(keypoints, 'confidence') and keypoints.confidence is not None:
+            kpts_conf = keypoints.confidence[0]  # (32,) - confidence values
+        else:
+            kpts_conf = np.ones(len(kpts_xy))  # Default to 1.0 if no confidence
+
+        # Combine into (32, 3) format for compatibility
+        kpts = np.concatenate([kpts_xy, kpts_conf[:, np.newaxis]], axis=1)
 
         # Count visible keypoints
         visible_count = (kpts[:, 2] > 0.5).sum()
@@ -835,13 +842,13 @@ class CompleteSoccerAnalysisPipeline:
             player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
 
             # Visualize keypoints on sample frames
-            if i in viz_frames and keypoints is not None and keypoints.size > 0:
+            if i in viz_frames and keypoints is not None and len(keypoints) > 0:
                 self._visualize_keypoints(frame.copy(), keypoints, i, output_dir)
 
             # Filter ball detections using tracker (removes anomalies)
             ball_detections = self.ball_tracker.update(ball_detections)
 
-            # Add frame data to adaptive mapper (YOLO keypoints only)
+            # Add frame data to adaptive mapper (sv.KeyPoints object)
             adaptive_mapper.add_frame_data(i, keypoints)
 
             # Update with tracking

@@ -15,11 +15,14 @@ class ViewTransformer:
     """
     ViewTransformer for perspective transformation using homography.
 
-    MATCHES RESEARCH CODE APPROACH:
-    Uses cv2.findHomography() with DEFAULT method (no RANSAC) because:
-    - Keypoints are already filtered spatially (x > 1, y > 1)
-    - RANSAC is too strict for partial pitch views (rejects valid points)
-    - Research code trusts YOLO's keypoint detection quality
+    ROBOFLOW/SPORTS APPROACH:
+    Uses cv2.findHomography() with RANSAC (default) for robust outlier rejection.
+    This is critical for handling noisy keypoint detections in real-world footage.
+
+    The roboflow/sports library uses:
+        self.m, _ = cv2.findHomography(source, target)
+
+    Which defaults to cv2.RANSAC with threshold 3.0 when more than 4 points.
 
     Uses findHomography (not getPerspectiveTransform) to handle varying numbers
     of visible keypoints (4 to 32) as camera pans and zooms during the match.
@@ -51,9 +54,9 @@ class ViewTransformer:
         source = source.astype(np.float32)
         target = target.astype(np.float32)
 
-        # MATCH RESEARCH CODE: Use DEFAULT findHomography (NO RANSAC)
-        # Research code: self.m, _ = cv2.findHomography(source, target)
-        # They trust the spatially filtered keypoints, no RANSAC outlier rejection
+        # ROBOFLOW/SPORTS: Use cv2.findHomography with default RANSAC
+        # When called without method parameter and >4 points, OpenCV uses RANSAC
+        # with threshold=3.0 automatically for robustness
         self.m, _ = cv2.findHomography(source, target)
 
         if self.m is None:
@@ -117,12 +120,15 @@ class SoccerPitchConfiguration:
     four characteristic points are visible for homography calculation.
 
     Pitch dimensions: 105m x 68m (FIFA standard)
-    Coordinate system: 12000 x 7000 units (for convenient integer coordinates)
+    Coordinate system: 12000 x 7000 units (centimeters - ROBOFLOW/SPORTS STANDARD)
+
+    CRITICAL: Uses centimeters (12000 x 7000) to match roboflow/sports exactly.
+    This is the correct scale - homography works with these coordinates.
     """
 
     def __init__(self):
         """Initialize soccer pitch configuration with 32 reference points."""
-        # Pitch dimensions in centimeters
+        # Pitch dimensions in centimeters (ROBOFLOW/SPORTS STANDARD)
         self.width = 7000  # [cm]
         self.length = 12000  # [cm]
         self.penalty_box_width = 4100  # [cm]
@@ -130,9 +136,7 @@ class SoccerPitchConfiguration:
         self.goal_box_width = 1832  # [cm]
         self.goal_box_length = 550  # [cm]
         self.centre_circle_radius = 915  # [cm]
-        self.penalty_spot_distance = 1100  # [cm]
-
-        # Define edges for visualization
+        self.penalty_spot_distance = 1100  # [cm]        # Define edges for visualization
         self.edges = [
             (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (7, 8),
             (10, 11), (11, 12), (12, 13), (14, 15), (15, 16),

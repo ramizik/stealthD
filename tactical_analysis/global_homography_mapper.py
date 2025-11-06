@@ -495,7 +495,7 @@ class GlobalHomographyMapper:
 
         # Ultimate fallback: return center of field
         print(f"[WARNING] All tiers failed! Returning field center (frame {frame_idx}, player {player_id})")
-        center_pitch = np.array([[6000.0, 3500.0]])  # Center of 12000x7000 pitch
+        center_pitch = np.array([[6000.0, 3500.0]])  # Center of 12000x7000 pitch (cm)
         return center_pitch, 'emergency_center'
 
     def _build_per_frame_matrix(self, keypoints: Dict) -> Optional[np.ndarray]:
@@ -559,7 +559,7 @@ class GlobalHomographyMapper:
         Args:
             matrix: 3x3 homography matrix
             pixel_coords: Sample pixel coordinates to test
-            max_coord: Maximum acceptable pitch coordinate (pitch is 12000x7000)
+            max_coord: Maximum acceptable pitch coordinate (pitch is 12000x7000 cm)
 
         Returns:
             True if matrix produces valid coordinates
@@ -609,7 +609,7 @@ class GlobalHomographyMapper:
         norm_x = np.clip(norm_x, 0, 1)
         norm_y = np.clip(norm_y, 0, 1)
 
-        # Scale to pitch coordinates (12000x7000)
+        # Scale to pitch coordinates (12000x7000 cm - roboflow/sports standard)
         pitch_coords = np.zeros_like(pixel_coords, dtype=np.float32)
         pitch_coords[:, 0] = norm_x * 12000.0
         pitch_coords[:, 1] = norm_y * 7000.0

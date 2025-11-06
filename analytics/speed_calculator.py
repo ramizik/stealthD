@@ -302,13 +302,13 @@ class SpeedCalculator:
                 # DEBUG: Log smoothing corrections (removed - now in position_smoother)
                 # if is_outlier and i < 5:  # Already logged in position_smoother with more detail
 
-                # DEBUG: Log out-of-bounds coordinates
-                if (field_coord[0] < 0 or field_coord[0] > self.field_width or
-                    field_coord[1] < 0 or field_coord[1] > self.field_height):
-                    print(f"[COORD DEBUG] Player {player_id} Frame {frame_idx}: "
-                          f"OUT OF BOUNDS ({field_coord[0]:.2f}, {field_coord[1]:.2f})m "
-                          f"from pixel ({foot_pos[0]:.1f}, {foot_pos[1]:.1f}) "
-                          f"via {transform_method} (conf: {confidence:.2f})")
+                # DEBUG: Log out-of-bounds coordinates (disabled for cleaner output)
+                # if (field_coord[0] < 0 or field_coord[0] > self.field_width or
+                #     field_coord[1] < 0 or field_coord[1] > self.field_height):
+                #     print(f"[COORD DEBUG] Player {player_id} Frame {frame_idx}: "
+                #           f"OUT OF BOUNDS ({field_coord[0]:.2f}, {field_coord[1]:.2f})m "
+                #           f"from pixel ({foot_pos[0]:.1f}, {foot_pos[1]:.1f}) "
+                #           f"via {transform_method} (conf: {confidence:.2f})")
 
                 field_coordinates[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
 

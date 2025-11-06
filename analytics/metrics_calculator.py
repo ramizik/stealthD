@@ -130,6 +130,7 @@ class MetricsCalculator:
         player_tracks = all_tracks.get('player', {})
         ball_tracks = all_tracks.get('ball', {})
         team_assignments = all_tracks.get('player_classids', {})
+        goalkeeper_assignments = all_tracks.get('player_is_goalkeeper', {})
 
         # Get video dimensions
         video_dimensions = (video_info.width, video_info.height)
@@ -203,7 +204,8 @@ class MetricsCalculator:
         # Step 7: Aggregate player analytics
         print("  - Aggregating player analytics...")
         player_analytics = self._aggregate_player_analytics(
-            player_speeds, player_possession_time, player_pass_counts, team_assignments, player_touches
+            player_speeds, player_possession_time, player_pass_counts, team_assignments,
+            player_touches, goalkeeper_assignments
         )
 
         print(f"Analytics complete: {len(player_analytics)} players, {len(passes)} passes detected, {sum(player_touches.values())} total touches")
@@ -226,7 +228,8 @@ class MetricsCalculator:
         }
 
     def _aggregate_player_analytics(self, player_speeds: Dict, player_possession_time: Dict,
-                                    player_pass_counts: Dict, team_assignments: Dict, player_touches: Dict = None) -> Dict:
+                                    player_pass_counts: Dict, team_assignments: Dict, player_touches: Dict = None,
+                                    goalkeeper_assignments: Dict = None) -> Dict:
         """
         Aggregate all analytics data per player.
 
@@ -236,6 +239,7 @@ class MetricsCalculator:
             player_pass_counts: Pass counts from PassDetector
             team_assignments: Team assignments {frame_idx: {player_id: team_id}}
             player_touches: Touch counts from PlayerBallAssigner (optional)
+            goalkeeper_assignments: Goalkeeper status {frame_idx: {player_id: is_goalkeeper}} (optional)
 
         Returns:
             Dictionary {player_id: {all analytics combined}}
@@ -256,6 +260,9 @@ class MetricsCalculator:
             player_team = self._get_player_team(player_id, team_assignments)
             if player_team is not None:
                 analytics['team'] = int(player_team)
+
+            # Get goalkeeper status (check if player was ever marked as goalkeeper)
+            analytics['is_goalkeeper'] = self._is_player_goalkeeper(player_id, goalkeeper_assignments)
 
             # Speed metrics
             if player_id in player_speeds:
@@ -285,6 +292,26 @@ class MetricsCalculator:
             player_analytics[int(player_id)] = analytics
 
         return player_analytics
+
+    def _is_player_goalkeeper(self, player_id: int, goalkeeper_assignments: Dict) -> bool:
+        """
+        Check if a player was ever marked as a goalkeeper.
+
+        Args:
+            player_id: Player ID
+            goalkeeper_assignments: Dictionary {frame_idx: {player_id: is_goalkeeper}}
+
+        Returns:
+            True if player was marked as goalkeeper in any frame, False otherwise
+        """
+        if not goalkeeper_assignments:
+            return False
+
+        for frame_idx, frame_goalkeepers in goalkeeper_assignments.items():
+            if player_id in frame_goalkeepers and frame_goalkeepers[player_id]:
+                return True
+
+        return False
 
     def _get_player_team(self, player_id: int, team_assignments: Dict) -> int:
         """

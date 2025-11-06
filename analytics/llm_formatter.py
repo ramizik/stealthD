@@ -7,11 +7,12 @@ for LLM consumption and coaching insights.
 
 import sys
 from pathlib import Path
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-from typing import Dict, List, Any
 import time
+from typing import Any, Dict, List
 
 
 class LLMDataFormatter:
@@ -139,7 +140,8 @@ class LLMDataFormatter:
 
             # Basic info
             team = analytics.get('team', None)
-            position = self._estimate_position(player_id_int, team, player_speeds)
+            is_goalkeeper = analytics.get('is_goalkeeper', False)
+            position = self._estimate_position(player_id_int, team, player_speeds, is_goalkeeper)
 
             # Performance metrics
             performance = {
@@ -397,8 +399,23 @@ class LLMDataFormatter:
 
     # Helper methods
 
-    def _estimate_position(self, player_id: int, team: int, player_speeds: Dict) -> str:
-        """Estimate player position based on average field position."""
+    def _estimate_position(self, player_id: int, team: int, player_speeds: Dict, is_goalkeeper: bool = False) -> str:
+        """
+        Estimate player position based on goalkeeper status and heuristics.
+
+        Args:
+            player_id: Player ID
+            team: Team ID (0 or 1)
+            player_speeds: Speed data per player
+            is_goalkeeper: Whether player is confirmed as goalkeeper
+
+        Returns:
+            Position string (Goalkeeper, Defender, Midfielder, Forward)
+        """
+        # Goalkeeper takes priority over all other position estimates
+        if is_goalkeeper:
+            return "Goalkeeper"
+
         # Placeholder - will be improved with formation detection
         if player_id in [1, 2, 3, 4, 12, 13, 14, 15]:
             return "Defender"

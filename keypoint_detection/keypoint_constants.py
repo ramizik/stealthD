@@ -20,7 +20,8 @@ NUM_KEYPOINTS = 32  # Updated from 29 to 32 for new pitch detection model
 KEYPOINT_DIMENSIONS = 3  # (x, y, visibility)
 CONFIDENCE_THRESHOLD = 0.5
 
-# Soccer field keypoint names (32 keypoints) - Updated for new pitch detection model
+# Soccer field keypoint names (32 keypoints) - Official SoccerNet layout
+# Based on roboflow/sports repository SoccerPitchConfiguration
 KEYPOINT_NAMES = {
     0: "sideline_top_left",
     1: "big_rect_left_top_pt1",
@@ -51,46 +52,31 @@ KEYPOINT_NAMES = {
     26: "right_semicircle_left",
     27: "center_circle_left",
     28: "center_circle_right",
-    29: "keypoint_29",  # Additional keypoint from 32-point model
-    30: "keypoint_30",  # Additional keypoint from 32-point model
-    31: "keypoint_31",  # Additional keypoint from 32-point model
+    29: "big_rect_right_top_edge",        # Right penalty box top edge
+    30: "sideline_bottom_right_corner",   # Bottom-right field corner (duplicate of 25)
+    31: "center_circle_left_edge",        # Left edge of center circle on center line
 }
 
-# Keypoint connections for visualization
+# Keypoint connections for visualization - EXACT match to SoccerPitchConfiguration.edges
+# Converted from 1-indexed to 0-indexed Python arrays
+# Original edges from sports_compat.py SoccerPitchConfiguration:
+# (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (7, 8),
+# (10, 11), (11, 12), (12, 13), (14, 15), (15, 16),
+# (16, 17), (18, 19), (19, 20), (20, 21), (23, 24),
+# (25, 26), (26, 27), (27, 28), (28, 29), (29, 30),
+# (1, 14), (2, 10), (3, 7), (4, 8), (5, 13), (6, 17),
+# (14, 25), (18, 26), (23, 27), (24, 28), (21, 29), (17, 30)
 KEYPOINT_CONNECTIONS = [
-    # Field boundary connections
-    (0, 16),   # Top left to top right
-    (0, 9),    # Top left to bottom left
-    (16, 25),  # Top right to bottom right
-    (9, 25),   # Bottom left to bottom right
-
-    # Left penalty area
-    (1, 2),    # Big rect left top connections
-    (3, 4),    # Big rect left bottom connections
-    (1, 3),    # Big rect left vertical
-    (2, 4),    # Big rect left vertical
-
-    # Left goal area
-    (5, 6),    # Small rect left top connections
-    (7, 8),    # Small rect left bottom connections
-    (5, 7),    # Small rect left vertical
-    (6, 8),    # Small rect left vertical
-
-    # Right penalty area
-    (17, 18),  # Big rect right top connections
-    (19, 20),  # Big rect right bottom connections
-    (17, 19),  # Big rect right vertical
-    (18, 20),  # Big rect right vertical
-
-    # Right goal area
-    (21, 22),  # Small rect right top connections
-    (23, 24),  # Small rect right bottom connections
-    (21, 23),  # Small rect right vertical
-    (22, 24),  # Small rect right vertical
-
-    # Center line and circle
-    (11, 12),  # Center line vertical
-    (13, 14),  # Center circle vertical
+    # Horizontal edges (left side)
+    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (6, 7),
+    # Horizontal edges (center and right)
+    (9, 10), (10, 11), (11, 12), (13, 14), (14, 15),
+    (15, 16), (17, 18), (18, 19), (19, 20), (22, 23),
+    # Horizontal edges (far right)
+    (24, 25), (25, 26), (26, 27), (27, 28), (28, 29),
+    # Vertical/cross-field connections
+    (0, 13), (1, 9), (2, 6), (3, 7), (4, 12), (5, 16),
+    (13, 24), (17, 25), (22, 26), (23, 27), (20, 28), (16, 29)
 ]
 
 # Field corner keypoint indices

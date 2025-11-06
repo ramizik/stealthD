@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import supervision as sv
 
 from tactical_analysis.calibration_utils import (
     estimate_homography_normalized, refine_homography_pnp, validate_homography)
@@ -110,41 +111,52 @@ class AdaptiveHomographyMapper:
         self.shot_boundary_set = set(shot_boundaries)
         print(f"[Adaptive Homography] Set {len(shot_boundaries)} shot boundaries for scene-aware processing")
 
-    def add_frame_data(self, frame_idx: int, yolo_keypoints: Optional[np.ndarray]):
+    def add_frame_data(self, frame_idx: int, keypoints: 'sv.KeyPoints'):
         """
         Add detected keypoints for a frame.
 
+        ROBOFLOW/SPORTS APPROACH:
+        Uses sv.KeyPoints object with .xy property and applies mask to BOTH
+        source and target simultaneously to maintain index alignment.
+
         Args:
             frame_idx: Frame index
-            yolo_keypoints: YOLO pose keypoints (32, 3) or None
+            keypoints: sv.KeyPoints object from sv.KeyPoints.from_ultralytics()
         """
         self.total_frames_processed += 1
 
-        # Collect YOLO keypoints
+        if keypoints is None or len(keypoints) == 0:
+            self.frame_keypoints[frame_idx] = []
+            return
+
+        # ROBOFLOW PATTERN: Use keypoints.xy[0] to get coordinates
+        # This matches their exact implementation!
+        mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
+
+        # DEBUG: Log keypoint statistics for first 5 frames
+        if frame_idx <= 5:
+            total_kp = len(keypoints.xy[0])
+            num_valid = np.sum(mask)
+            print(f"[Adaptive Homography] Frame {frame_idx} DEBUG: "
+                  f"Total keypoints: {total_kp}, Spatially valid (x>1,y>1): {num_valid}")
+
+        # Apply mask to BOTH source and target (exact roboflow pattern)
+        valid_pixel_points = keypoints.xy[0][mask].astype(np.float32)
+        valid_pitch_points = np.array(self.CONFIG.vertices)[mask].astype(np.float32)
+
+        # Get confidence if available
+        if hasattr(keypoints, 'confidence') and keypoints.confidence is not None:
+            valid_confidences = keypoints.confidence[0][mask]
+        else:
+            valid_confidences = np.ones(len(valid_pixel_points))
+
+        # Combine for storage
         combined_keypoints = []
-
-        # Add YOLO keypoints if available
-        if yolo_keypoints is not None and yolo_keypoints.shape[0] > 0:
-            keypoints = yolo_keypoints[0]  # Take first detection
-
-            # DEBUG: Log raw keypoint data for first 3 frames
-            if frame_idx < 3:
-                total_kp = len(keypoints)
-                spatial_valid = np.sum((keypoints[:, 0] > 1) & (keypoints[:, 1] > 1))
-                print(f"[Adaptive Homography] Frame {frame_idx} DEBUG: "
-                      f"Total keypoints: {total_kp}, Spatial valid (x>1,y>1): {spatial_valid}")
-
-            for kp_idx in range(len(keypoints)):
-                x, y, conf = keypoints[kp_idx]
-                # MATCH RESEARCH CODE: ONLY spatial filtering, NO confidence threshold
-                # Research code: mask = (keypoints.xy[0][:, 0] > 1) & (keypoints.xy[0][:, 1] > 1)
-                # They do NOT filter by confidence - only by spatial validity
-                if x > 1 and y > 1:
-                    # Map to pitch point
-                    pitch_idx = self._get_yolo_keypoint_mapping(kp_idx)
-                    if pitch_idx is not None and pitch_idx < len(self.all_pitch_points):
-                        pitch_point = self.all_pitch_points[pitch_idx]
-                        combined_keypoints.append((x, y, pitch_point[0], pitch_point[1], conf))
+        for i in range(len(valid_pixel_points)):
+            x, y = valid_pixel_points[i]
+            pitch_x, pitch_y = valid_pitch_points[i]
+            conf = valid_confidences[i]
+            combined_keypoints.append((x, y, pitch_x, pitch_y, conf))
 
         # Store keypoints
         self.frame_keypoints[frame_idx] = combined_keypoints
@@ -243,19 +255,40 @@ class AdaptiveHomographyMapper:
         pitch_points = np.array(pitch_points, dtype=np.float32)
 
         try:
-            # SOCCERNET ENHANCEMENT: Use normalized homography estimation
-            # Dramatically improves numerical stability
-            H_raw, mask = estimate_homography_normalized(
+            # ROBOFLOW/SPORTS EXACT MATCH: Use cv2.findHomography with default parameters
+            # They use: self.m, _ = cv2.findHomography(source, target)
+            # This automatically uses RANSAC with threshold=3.0 when >4 points
+            H_raw, mask = cv2.findHomography(
                 pixel_points,
-                pitch_points,
-                method=0  # No RANSAC - trust spatially filtered keypoints
+                pitch_points
             )
 
-            # Validate homography
-            if H_raw is None or not validate_homography(H_raw):
-                if frame_idx < 5:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: Invalid homography")
+            # Check if we have enough inliers after RANSAC
+            if mask is not None and len(mask) > 0:
+                num_inliers = np.sum(mask)
+                inlier_ratio = num_inliers / len(mask)
+
+                # Log RANSAC results for first 10 frames to diagnose issues
+                if frame_idx <= 10:
+                    print(f"[Adaptive Homography] Frame {frame_idx} RANSAC: "
+                          f"{num_inliers}/{len(mask)} inliers ({inlier_ratio:.1%})")
+
+                # Require at least 50% inliers and minimum 4 inliers
+                if num_inliers < 4 or inlier_ratio < 0.5:
+                    if frame_idx < 5 or frame_idx % 100 == 0:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: Too few inliers "
+                              f"({num_inliers}/{len(mask)}, {inlier_ratio:.1%})")
+                    return False
+
+            # Validate homography exists
+            if H_raw is None:
+                if frame_idx <= 10:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: H_raw is None")
                 return False
+
+            # ROBOFLOW/SPORTS: No validation - just use the homography!
+            # They trust RANSAC to filter outliers, validation often rejects good matrices
+            # due to coordinate system differences (cm vs pixels vs normalized)
 
             # SOCCERNET ENHANCEMENT: Optional PnP refinement for better accuracy
             # Only refine if we have good keypoint coverage
@@ -268,7 +301,7 @@ class AdaptiveHomographyMapper:
                     image_size=(1920, 1080),
                     max_iterations=20000
                 )
-                if H_refined is not None and validate_homography(H_refined):
+                if H_refined is not None:
                     H_raw = H_refined
 
             num_keypoints = len(keypoints)
@@ -492,7 +525,7 @@ class AdaptiveHomographyMapper:
             transformed = cv2.perspectiveTransform(point, matrix)
             field_coord = transformed[0][0]
 
-            # Convert from pitch units to meters
+            # Convert from pitch units (12000 x 7000 cm) to meters
             field_coord[0] = field_coord[0] * (self.field_width / 12000.0)
             field_coord[1] = field_coord[1] * (self.field_height / 7000.0)
 

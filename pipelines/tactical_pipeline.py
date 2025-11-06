@@ -132,8 +132,8 @@ class TacticalPipeline:
             for point in player_points:
                 if not np.isnan(point).any():
                     # Convert pitch coordinates to frame coordinates
-                    x_ratio = point[0] / 12000  # Pitch width is 12000 units
-                    y_ratio = point[1] / 7000   # Pitch height is 7000 units
+                    x_ratio = point[0] / 12000  # Pitch width is 12000 units (cm)
+                    y_ratio = point[1] / 7000   # Pitch height is 7000 units (cm)
 
                     frame_x = int(x_ratio * frame_size[0])
                     frame_y = int(y_ratio * frame_size[1])
@@ -146,8 +146,8 @@ class TacticalPipeline:
             for point in team2_points:
                 if not np.isnan(point).any():
                     # Convert pitch coordinates to frame coordinates
-                    x_ratio = point[0] / 12000  # Pitch width is 12000 units
-                    y_ratio = point[1] / 7000   # Pitch height is 7000 units
+                    x_ratio = point[0] / 12000  # Pitch width is 12000 units (cm)
+                    y_ratio = point[1] / 7000   # Pitch height is 7000 units (cm)
 
                     frame_x = int(x_ratio * frame_size[0])
                     frame_y = int(y_ratio * frame_size[1])
