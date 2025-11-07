@@ -96,6 +96,13 @@ class AdaptiveHomographyMapper:
         self.shot_boundaries = []  # List of frame indices where camera shots change
         self.shot_boundary_set = set()  # Set for fast lookup
 
+        # ADAPTIVE KEYPOINT DETECTION (for varying camera angles)
+        self._consecutive_failures = 0  # Track consecutive frames without keypoints
+        self._consecutive_successes = 0  # Track consecutive frames with keypoints
+        self._keypoint_compatible = True  # Whether current camera angle supports keypoints
+        self._last_compatibility_check = 0  # Frame where compatibility was last changed
+        self._warning_throttle = 0  # Counter for throttling console warnings
+
     def set_shot_boundaries(self, shot_boundaries: List[int]):
         """
         Set camera shot boundaries for improved homography stability.
@@ -119,6 +126,10 @@ class AdaptiveHomographyMapper:
         Uses sv.KeyPoints object with .xy property and applies mask to BOTH
         source and target simultaneously to maintain index alignment.
 
+        ADAPTIVE DETECTION:
+        Automatically detects incompatible camera angles and switches to
+        proportional fallback, then re-enables when keypoints become available.
+
         Args:
             frame_idx: Frame index
             keypoints: sv.KeyPoints object from sv.KeyPoints.from_ultralytics()
@@ -126,6 +137,38 @@ class AdaptiveHomographyMapper:
         self.total_frames_processed += 1
 
         if keypoints is None or len(keypoints) == 0:
+            self.frame_keypoints[frame_idx] = []
+            self._consecutive_failures += 1
+            self._consecutive_successes = 0  # Reset success counter
+
+            # Throttle warnings - only log every 100 failures to reduce console spam
+            self._warning_throttle += 1
+            if self._warning_throttle % 100 == 1:
+                print(f"[Adaptive Homography] ⚠️ No keypoints detected ({self._consecutive_failures} consecutive failures)")
+
+            # Mark as incompatible after 50 consecutive failures
+            if self._consecutive_failures >= 50 and self._keypoint_compatible:
+                print(f"[Adaptive Homography] ⚠️ Camera angle appears incompatible with keypoint detection (frame {frame_idx})")
+                print("[Adaptive Homography] → Switching to proportional fallback for position mapping")
+                self._keypoint_compatible = False
+                self._last_compatibility_check = frame_idx
+                self._warning_throttle = 0  # Reset throttle
+
+            return
+
+        # Keypoints detected successfully!
+        self._consecutive_failures = 0
+        self._consecutive_successes += 1
+        self._warning_throttle = 0  # Reset warning throttle on success
+
+        # Re-enable homography if we get 10 consecutive successes after being disabled
+        if not self._keypoint_compatible and self._consecutive_successes >= 10:
+            print(f"[Adaptive Homography] ✓ Camera angle compatible again - re-enabling homography (frame {frame_idx})")
+            self._keypoint_compatible = True
+            self._last_compatibility_check = frame_idx
+
+        # Skip detailed processing if still in incompatible mode (but keep counting successes)
+        if not self._keypoint_compatible:
             self.frame_keypoints[frame_idx] = []
             return
 
@@ -480,9 +523,10 @@ class AdaptiveHomographyMapper:
         Transform pixel coordinate to field coordinate with fallbacks.
 
         Multi-tier strategy:
-        1. Use frame homography if available
-        2. Interpolate from nearby frames
-        3. Use proportional scaling
+        1. Check if camera angle is compatible with keypoint detection
+        2. Use frame homography if available
+        3. Interpolate from nearby frames
+        4. Use proportional scaling
 
         Args:
             frame_idx: Frame index
@@ -492,6 +536,13 @@ class AdaptiveHomographyMapper:
         Returns:
             Tuple of (field_coord, method, confidence)
         """
+        # ADAPTIVE DETECTION: If camera angle is incompatible, skip homography entirely
+        if not self._keypoint_compatible:
+            self.proportional_fallback_count += 1
+            # Use simple proportional mapping for incompatible angles
+            field_coord = self._proportional_scaling(pixel_coord)
+            return field_coord, 'proportional (incompatible angle)', 0.3
+
         # Compensate for camera motion first
         if camera_motion is not None:
             pixel_coord = pixel_coord.copy()
@@ -688,16 +739,18 @@ class AdaptiveHomographyMapper:
             ),
             'temporal_fallback_count': self.temporal_fallback_count,
             'proportional_fallback_count': self.proportional_fallback_count,
-            'matrix_rejected_count': self.matrix_rejected_count,  # NEW
+            'matrix_rejected_count': self.matrix_rejected_count,
             'matrix_rejection_rate': (
                 self.matrix_rejected_count / self.total_frames_processed
                 if self.total_frames_processed > 0 else 0.0
-            ),  # NEW
-            'smoothing_active': self.H_smooth is not None,  # NEW
+            ),
+            'smoothing_active': self.H_smooth is not None,
+            'keypoint_compatible': self._keypoint_compatible,  # NEW
+            'compatibility_changes': 1 if self._last_compatibility_check > 0 else 0,  # NEW
         }
 
     def print_statistics(self):
-        """Print processing statistics including stability metrics."""
+        """Print processing statistics including stability and adaptive detection metrics."""
         stats = self.get_statistics()
         print(f"\n[Adaptive Homography] Statistics:")
         print(f"  Total frames processed: {stats['total_frames_processed']}")
@@ -706,5 +759,14 @@ class AdaptiveHomographyMapper:
         print(f"  Temporal fallbacks: {stats['temporal_fallback_count']}")
         print(f"  Proportional fallbacks: {stats['proportional_fallback_count']}")
         print(f"  Unstable matrices rejected: {stats['matrix_rejected_count']} "
-              f"({100*stats['matrix_rejection_rate']:.1f}%)")  # NEW
-        print(f"  EMA smoothing active: {stats['smoothing_active']}")  # NEW
+              f"({100*stats['matrix_rejection_rate']:.1f}%)")
+        print(f"  EMA smoothing active: {stats['smoothing_active']}")
+
+        # ADAPTIVE DETECTION STATUS
+        if not stats['keypoint_compatible']:
+            print(f"  ⚠️ Camera angle: INCOMPATIBLE with keypoint detection (proportional fallback active)")
+        else:
+            print(f"  ✓ Camera angle: Compatible with keypoint detection")
+
+        if stats['compatibility_changes'] > 0:
+            print(f"  Camera angle changes detected: {stats['compatibility_changes']}")

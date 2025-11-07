@@ -18,6 +18,9 @@ import supervision as sv
 import torch
 from ultralytics import YOLO
 
+# Global counter for throttling keypoint detection warnings
+_keypoint_warning_counter = 0
+
 # ================================================
 # Core Detection Functions
 # ================================================
@@ -104,6 +107,9 @@ def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv
     # This gives us the .xy property that matches their implementation exactly
     keypoints = sv.KeyPoints.from_ultralytics(results)
 
+    # Throttle warnings to reduce console spam (only warn every 100 failures)
+    global _keypoint_warning_counter
+
     # Log keypoint statistics for debugging (first few frames only)
     if len(keypoints) > 0:
         # Apply spatial filter to count valid keypoints
@@ -112,9 +118,17 @@ def get_keypoint_detections(keypoint_model: YOLO, frame: np.ndarray) -> Tuple[sv
 
         # Only warn if extremely few valid keypoints (< 4 needed for homography)
         if valid_count < 4:
-            print(f"[Keypoint Detection] WARNING: Only {valid_count}/32 keypoints with x>1, y>1")
+            _keypoint_warning_counter += 1
+            if _keypoint_warning_counter % 100 == 1:
+                print(f"[Keypoint Detection] WARNING: Only {valid_count}/32 keypoints with x>1, y>1 "
+                      f"({_keypoint_warning_counter} occurrences)")
+        else:
+            _keypoint_warning_counter = 0  # Reset on success
     else:
-        print(f"[Keypoint Detection] WARNING: No pitch keypoints detected in frame")
+        _keypoint_warning_counter += 1
+        if _keypoint_warning_counter % 100 == 1:
+            print(f"[Keypoint Detection] WARNING: No pitch keypoints detected in frame "
+                  f"({_keypoint_warning_counter} occurrences)")
 
     return detections, keypoints
 
