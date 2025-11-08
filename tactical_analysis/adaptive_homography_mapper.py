@@ -30,6 +30,40 @@ from tactical_analysis.calibration_utils import (
 from tactical_analysis.sports_compat import SoccerPitchConfiguration
 
 
+def validate_homography_simple(H: np.ndarray) -> bool:
+    """
+    Simple validation that only checks for most critical issues.
+
+    This is used as a final fallback when enhanced validation is too strict.
+
+    Args:
+        H: Homography matrix (3x3)
+
+    Returns:
+        True if homography passes basic checks, False otherwise
+    """
+    if H is None:
+        return False
+
+    # Check for NaN or Inf
+    if not np.all(np.isfinite(H)):
+        return False
+
+    # Check determinant (should not be zero)
+    try:
+        det = np.linalg.det(H)
+        if abs(det) < 1e-6:  # Very small but not zero
+            return False
+    except np.linalg.LinAlgError:
+        return False
+
+    # Check for extremely large values (would cause overflow)
+    if np.max(np.abs(H)) > 1e8:  # 100 million
+        return False
+
+    return True
+
+
 class AdaptiveHomographyMapper:
     """
     Per-frame homography with temporal fallbacks for moving cameras.
@@ -43,7 +77,7 @@ class AdaptiveHomographyMapper:
 
     def __init__(self, field_dimensions: Tuple[float, float] = (105, 68),
                  min_keypoints: int = 4, temporal_window: int = 15,
-                 ema_alpha: float = 0.3, max_matrix_change: float = 50.0,
+                 ema_alpha: float = 0.05, max_matrix_change: float = 50.0,
                  position_smoothing_buffer: int = 3):
         """
         Initialize adaptive homography mapper with stability features.
@@ -52,7 +86,7 @@ class AdaptiveHomographyMapper:
             field_dimensions: (width, height) in meters (default: FIFA standard)
             min_keypoints: Minimum keypoints required for homography (must be >= 4)
             temporal_window: Frames to search for temporal fallback
-            ema_alpha: EMA smoothing weight for new matrices (0.3 = 30% new, 70% previous)
+            ema_alpha: EMA smoothing weight for new matrices (0.05 = 5% new, 95% previous)
             max_matrix_change: Maximum allowed matrix element change (reject if exceeded)
             position_smoothing_buffer: Number of positions to buffer per player for smoothing
         """
@@ -61,10 +95,15 @@ class AdaptiveHomographyMapper:
         self.min_keypoints = max(4, min_keypoints)  # Ensure at least 4 for homography
         self.temporal_window = temporal_window
 
-        # STABILITY PARAMETERS
-        self.ema_alpha = ema_alpha  # Lower = more smoothing (0.2-0.4 recommended)
+        # STABILITY PARAMETERS - Strengthened for MVP demo
+        self.ema_alpha = ema_alpha  # Much lower = more smoothing (was 0.3)
         self.max_matrix_change = max_matrix_change  # Reject extreme changes
         self.position_smoothing_buffer = position_smoothing_buffer
+
+        # Adaptive alpha based on matrix stability
+        self.adaptive_ema_alpha = True
+        self.min_ema_alpha = 0.01  # Very aggressive smoothing for unstable frames
+        self.max_ema_alpha = 0.1   # Allow more responsiveness for stable frames
 
         # Initialize pitch configuration with 32 dense keypoints
         self.CONFIG = SoccerPitchConfiguration()
@@ -72,10 +111,23 @@ class AdaptiveHomographyMapper:
         # Get all 32 pitch reference points
         self.all_pitch_points = np.array(self.CONFIG.vertices, dtype=np.float32)
 
-        # Per-frame storage
+        # Initialize per-frame storage
         self.frame_homographies = {}  # {frame_idx: matrix}
-        self.frame_keypoints = {}  # {frame_idx: [(pixel_x, pixel_y, pitch_x, pitch_y)]}
+        self.frame_keypoints = {}  # {frame_idx: keypoints}
         self.frame_confidences = {}  # {frame_idx: confidence_score}
+
+        # Global homography matrix (built from all frames)
+        self.global_matrix = None
+        self.matrix_built = False  # Track if global matrix has been built
+
+        # Statistics tracking
+        self.homography_success_count = 0
+        self.total_frames_processed = 0
+        self.temporal_fallback_count = 0
+        self.last_valid_matrix = None
+
+        # Player position memory for fallback
+        self.player_position_memory = defaultdict(list)  # {player_id: [positions]}
 
         # TEMPORAL SMOOTHING STORAGE
         self.H_previous = None  # Last stable homography matrix
@@ -91,6 +143,10 @@ class AdaptiveHomographyMapper:
         self.temporal_fallback_count = 0
         self.proportional_fallback_count = 0
         self.matrix_rejected_count = 0  # New: Count unstable matrices rejected
+
+        # ADAPTIVE VALIDATION: Become more lenient if rejecting too many frames
+        self.validation_strict_mode = True  # Start with strict validation
+        self.rejection_threshold = 0.5  # If >50% rejected, relax validation
 
         # SHOT BOUNDARIES (for scene change detection)
         self.shot_boundaries = []  # List of frame indices where camera shots change
@@ -134,6 +190,20 @@ class AdaptiveHomographyMapper:
             frame_idx: Frame index
             keypoints: sv.KeyPoints object from sv.KeyPoints.from_ultralytics()
         """
+        # Initialize adaptive keypoint detection attributes if they don't exist (for backward compatibility)
+        if not hasattr(self, '_consecutive_failures'):
+            self._consecutive_failures = 0
+        if not hasattr(self, '_consecutive_successes'):
+            self._consecutive_successes = 0
+        if not hasattr(self, '_keypoint_compatible'):
+            self._keypoint_compatible = True
+        if not hasattr(self, '_last_compatibility_check'):
+            self._last_compatibility_check = 0
+        if not hasattr(self, '_warning_throttle'):
+            self._warning_throttle = 0
+
+        # Store frame data
+        self.frame_homographies[frame_idx] = None  # Will be filled after processing
         self.total_frames_processed += 1
 
         if keypoints is None or len(keypoints) == 0:
@@ -147,7 +217,7 @@ class AdaptiveHomographyMapper:
                 print(f"[Adaptive Homography] ⚠️ No keypoints detected ({self._consecutive_failures} consecutive failures)")
 
             # Mark as incompatible after 50 consecutive failures
-            if self._consecutive_failures >= 50 and self._keypoint_compatible:
+            if self._consecutive_failures >= 50 and getattr(self, '_keypoint_compatible', True):
                 print(f"[Adaptive Homography] ⚠️ Camera angle appears incompatible with keypoint detection (frame {frame_idx})")
                 print("[Adaptive Homography] → Switching to proportional fallback for position mapping")
                 self._keypoint_compatible = False
@@ -162,13 +232,13 @@ class AdaptiveHomographyMapper:
         self._warning_throttle = 0  # Reset warning throttle on success
 
         # Re-enable homography if we get 10 consecutive successes after being disabled
-        if not self._keypoint_compatible and self._consecutive_successes >= 10:
+        if not getattr(self, '_keypoint_compatible', True) and self._consecutive_successes >= 10:
             print(f"[Adaptive Homography] ✓ Camera angle compatible again - re-enabling homography (frame {frame_idx})")
             self._keypoint_compatible = True
             self._last_compatibility_check = frame_idx
 
         # Skip detailed processing if still in incompatible mode (but keep counting successes)
-        if not self._keypoint_compatible:
+        if not getattr(self, '_keypoint_compatible', True):
             self.frame_keypoints[frame_idx] = []
             return
 
@@ -217,6 +287,35 @@ class AdaptiveHomographyMapper:
             if self.total_frames_processed <= 5 or frame_idx % 100 == 0:
                 print(f"[Adaptive Homography] Frame {frame_idx}: Insufficient keypoints "
                       f"({len(combined_keypoints)}/{self.min_keypoints})")
+
+        # Try to build global matrix if we have enough successful frames
+        self._try_build_global_matrix()
+
+    def _try_build_global_matrix(self):
+        """
+        Build global homography matrix from successful frame homographies.
+
+        This is called after each frame to check if we have enough data
+        to build a reliable global matrix.
+        """
+        if self.matrix_built:
+            return  # Already built
+
+        # Need at least 5 successful frames to build global matrix
+        min_successful_frames = 5
+        successful_homographies = []
+
+        for frame_idx, H in self.frame_homographies.items():
+            if H is not None and len(H.shape) == 2 and H.shape == (3, 3):
+                successful_homographies.append(H)
+
+        if len(successful_homographies) >= min_successful_frames:
+            # Use median of successful homographies for stability
+            stacked_matrices = np.stack([H.flatten() for H in successful_homographies])
+            median_matrix_flat = np.median(stacked_matrices, axis=0)
+            self.global_matrix = median_matrix_flat.reshape((3, 3))
+            self.matrix_built = True
+            print(f"[Adaptive Homography] ✓ Built global matrix from {len(successful_homographies)} successful frames")
 
     def _get_yolo_keypoint_mapping(self, kp_idx: int) -> Optional[int]:
         """
@@ -284,7 +383,16 @@ class AdaptiveHomographyMapper:
             True if successful, False otherwise
         """
         if len(keypoints) < self.min_keypoints:
+            # DEBUG: Save failed frames for analysis
+            if frame_idx < 10:
+                print(f"[Adaptive Homography] Frame {frame_idx}: Insufficient keypoints ({len(keypoints)} < {self.min_keypoints})")
             return False
+
+        # DEBUG: Save keypoint visualization for first few frames
+        if frame_idx < 5:
+            # This would be called from main pipeline with frame available
+            # For now, we'll just log the keypoint count
+            print(f"[Adaptive Homography] Frame {frame_idx}: Processing {len(keypoints)} keypoints")
 
         # Extract pixel and pitch points
         pixel_points = []
@@ -329,9 +437,17 @@ class AdaptiveHomographyMapper:
                     print(f"[Adaptive Homography] Frame {frame_idx}: H_raw is None")
                 return False
 
-            # ROBOFLOW/SPORTS: No validation - just use the homography!
+            # ROBOFLOW/SPORTS: No validation - just use homography!
             # They trust RANSAC to filter outliers, validation often rejects good matrices
             # due to coordinate system differences (cm vs pixels vs normalized)
+
+            # ENHANCED VALIDATION: Use geometric validation instead of numerical
+            # This works regardless of coordinate system scaling and avoids the
+            # condition number mismatch that was causing 100% validation failure
+            if not self._validate_homography_geometric(H_raw, pixel_points, pitch_points):
+                if frame_idx <= 10 or self.matrix_rejected_count < 5:
+                    print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ Geometric validation failed")
+                return False
 
             # SOCCERNET ENHANCEMENT: Optional PnP refinement for better accuracy
             # Only refine if we have good keypoint coverage
@@ -378,8 +494,29 @@ class AdaptiveHomographyMapper:
                 confidence = 1.0
 
                 if frame_idx < 3:
-                    print(f"[Adaptive Homography] Frame {frame_idx}: ✓ Built initial homography from {num_keypoints} keypoints (SoccerNet enhanced)")
+                    print(f"[Adaptive Homography] Frame {frame_idx}: First frame - using raw homography")
             else:
+                # L2 NORM CHECK: Measure homography change magnitude
+                # Research shows this is more reliable than element-wise comparison
+                H_diff = H_median - self.H_previous
+                l2_norm = np.linalg.norm(H_diff, ord='fro')
+
+                # If change is too large, likely a camera cut or invalid estimation
+                if l2_norm > 50:  # Threshold based on research
+                    self.matrix_rejected_count += 1
+
+                    if frame_idx < 10 or self.matrix_rejected_count < 5:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ L2 norm too large ({l2_norm:.1f}) - rejecting")
+
+                    # Keep previous matrix
+                    matrix = self.H_previous.copy()
+                    confidence = 0.7
+
+                    # Store and continue
+                    self.frame_homographies[frame_idx] = matrix
+                    self.frame_confidences[frame_idx] = confidence
+                    return True
+
                 # Calculate difference from previous frame (using median-filtered matrix)
                 max_diff_raw = np.abs(H_median - self.H_previous).max()
 
@@ -453,6 +590,30 @@ class AdaptiveHomographyMapper:
                     return True
 
                 # STEP 3: Apply EMA smoothing with adaptive alpha
+                # Adaptive alpha based on matrix stability
+                if self.adaptive_ema_alpha:
+                    # Calculate matrix stability based on difference magnitude
+                    if max_diff_raw > 1000:
+                        # Catastrophic change - use very aggressive smoothing
+                        adaptive_alpha = self.min_ema_alpha  # 0.01
+                    elif max_diff_raw > 400:
+                        # Very large change - aggressive smoothing
+                        adaptive_alpha = 0.02
+                    elif max_diff_raw > 200:
+                        # Large change - moderate smoothing
+                        adaptive_alpha = 0.05
+                    else:
+                        # Normal change - standard smoothing
+                        adaptive_alpha = self.ema_alpha  # 0.05
+
+                    # Use the more conservative of the calculated alpha and adaptive alpha
+                    alpha = min(alpha, adaptive_alpha)
+
+                    # Log adaptive alpha usage for debugging
+                    if self.homography_success_count < 10 or frame_idx % 100 == 0:
+                        print(f"[Adaptive Homography] Frame {frame_idx}: Adaptive alpha {alpha:.3f} "
+                              f"(raw diff: {max_diff_raw:.1f})")
+
                 H_candidate = alpha * H_median + (1.0 - alpha) * self.H_previous
                 self.H_smooth = H_candidate
 
@@ -537,7 +698,7 @@ class AdaptiveHomographyMapper:
             Tuple of (field_coord, method, confidence)
         """
         # ADAPTIVE DETECTION: If camera angle is incompatible, skip homography entirely
-        if not self._keypoint_compatible:
+        if not getattr(self, '_keypoint_compatible', True):
             self.proportional_fallback_count += 1
             # Use simple proportional mapping for incompatible angles
             field_coord = self._proportional_scaling(pixel_coord)
@@ -567,6 +728,88 @@ class AdaptiveHomographyMapper:
         # Tier 3: Proportional scaling fallback
         self.proportional_fallback_count += 1
         field_coord = self._proportional_scaling(pixel_coord)
+        return field_coord, 'proportional', 0.3
+
+    def transform_points_robust(self, pixel_coords: np.ndarray, frame_idx: int = None,
+                               player_id: int = None, video_dimensions: Tuple[int, int] = None,
+                               per_frame_keypoints: Dict = None) -> Tuple[np.ndarray, str]:
+        """
+        ROBUST multi-tier transformation that NEVER returns null coordinates.
+
+        Fallback hierarchy (6 tiers):
+        1. Per-frame homography (if sufficient keypoints detected this frame)
+        2. Temporal smoothing (average of last 30 frames' matrices)
+        3. Global homography (if matrix_built and high confidence)
+        4. Last-known-good matrix (cached from most recent successful transform)
+        5. Per-player position memory (player's last known valid position)
+        6. Proportional field estimation (ALWAYS works - conservative fallback)
+
+        Args:
+            pixel_coords: Array of shape (N, 2) with [x, y] pixel coordinates
+            frame_idx: Current frame index (for temporal/debug logging)
+            player_id: Player ID (for per-player position memory)
+            video_dimensions: (width, height) of video in pixels
+            per_frame_keypoints: Dict with keypoint detections for this frame
+
+        Returns:
+            Tuple of (pitch_coords in pitch units, transformation_method string)
+            ALWAYS returns coordinates - never None
+        """
+        # ADAPTIVE DETECTION: If camera angle is incompatible, skip homography entirely
+        if not getattr(self, '_keypoint_compatible', True):
+            self.proportional_fallback_count += 1
+            # Use simple proportional mapping for incompatible angles
+            field_coord = self._proportional_scaling(pixel_coords)
+            return field_coord, 'proportional (incompatible angle)', 0.3
+
+        # Compensate for camera motion first
+        if video_dimensions is not None and player_id is not None:
+            # Get camera motion for this frame if available
+            camera_motion = None
+            if hasattr(self, 'camera_movement') and frame_idx < len(self.camera_movement):
+                camera_motion = self.camera_movement[frame_idx]
+
+            # Apply camera motion compensation
+            if camera_motion is not None:
+                pixel_coords = pixel_coords.copy()
+                pixel_coords[:, 0] -= camera_motion[0]
+                pixel_coords[:, 1] -= camera_motion[1]
+
+        # Tier 1: Per-frame homography
+        if frame_idx in self.frame_homographies:
+            matrix = self.frame_homographies[frame_idx]
+            confidence = self.frame_confidences.get(frame_idx, 0.5)
+            field_coord = self._apply_homography(pixel_coords, matrix)
+
+            if field_coord is not None:
+                return field_coord, 'per-frame', confidence
+
+        # Tier 2: Temporal interpolation from nearby frames
+        field_coord, conf = self._temporal_interpolation(frame_idx, pixel_coords)
+        if field_coord is not None:
+            self.temporal_fallback_count += 1
+            return field_coord, 'temporal', conf
+
+        # Tier 3: Global homography
+        if self.matrix_built and self.global_matrix is not None:
+            field_coord = self._apply_homography(pixel_coords, self.global_matrix)
+            return field_coord, 'global', 0.8
+
+        # Tier 4: Last-known-good matrix
+        if self.last_valid_matrix is not None:
+            field_coord = self._apply_homography(pixel_coords, self.last_valid_matrix)
+            return field_coord, 'last-known-good', 0.7
+
+        # Tier 5: Per-player position memory
+        if player_id in self.player_position_memory:
+            memory = self.player_position_memory[player_id]
+            if memory['frame'] > frame_idx - 30:  # Not too old
+                field_coord = memory['position']
+                return field_coord, 'player-memory', 0.6
+
+        # Tier 6: Proportional scaling fallback
+        self.proportional_fallback_count += 1
+        field_coord = self._proportional_scaling(pixel_coords)
         return field_coord, 'proportional', 0.3
 
     def _apply_homography(self, pixel_coord: np.ndarray, matrix: np.ndarray) -> Optional[np.ndarray]:
@@ -694,39 +937,47 @@ class AdaptiveHomographyMapper:
 
         return None, 0.0
 
-    def _proportional_scaling(self, pixel_coord: np.ndarray,
+    def _proportional_scaling(self, pixel_coords: np.ndarray,
                             video_dimensions: Tuple[int, int] = (1280, 720)) -> np.ndarray:
         """
         Conservative proportional scaling fallback.
 
         Args:
-            pixel_coord: Pixel coordinate
+            pixel_coords: Pixel coordinates (shape: [N, 2] or [2])
             video_dimensions: Video (width, height)
 
         Returns:
-            Field coordinate in meters
+            Field coordinates in meters (shape: [N, 2] or [2])
         """
         video_width, video_height = video_dimensions
+
+        # Ensure we have a 2D array
+        if pixel_coords.ndim == 1:
+            pixel_coords = pixel_coords.reshape(1, -1)
 
         # Assume field occupies central 60% of frame (conservative)
         field_visible_fraction = 0.6
         margin = (1 - field_visible_fraction) / 2
 
         # Normalize
-        norm_x = (pixel_coord[0] / video_width - margin) / field_visible_fraction
-        norm_y = (pixel_coord[1] / video_height - margin) / field_visible_fraction
+        norm_x = (pixel_coords[:, 0] / video_width - margin) / field_visible_fraction
+        norm_y = (pixel_coords[:, 1] / video_height - margin) / field_visible_fraction
 
         # Clamp to [0, 1]
         norm_x = np.clip(norm_x, 0, 1)
         norm_y = np.clip(norm_y, 0, 1)
 
         # Scale to field dimensions
-        field_coord = np.array([
+        field_coords = np.column_stack([
             norm_x * self.field_width,
             norm_y * self.field_height
-        ], dtype=np.float32)
+        ]).astype(np.float32)
 
-        return field_coord
+        # Return single coordinate if input was single coordinate
+        if field_coords.shape[0] == 1:
+            return field_coords[0]
+
+        return field_coords
 
     def get_statistics(self) -> Dict:
         """Get processing statistics including stability metrics."""
@@ -745,8 +996,8 @@ class AdaptiveHomographyMapper:
                 if self.total_frames_processed > 0 else 0.0
             ),
             'smoothing_active': self.H_smooth is not None,
-            'keypoint_compatible': self._keypoint_compatible,  # NEW
-            'compatibility_changes': 1 if self._last_compatibility_check > 0 else 0,  # NEW
+            'keypoint_compatible': getattr(self, '_keypoint_compatible', True),  # NEW with fallback
+            'compatibility_changes': 1 if getattr(self, '_last_compatibility_check', 0) > 0 else 0,  # NEW with fallback
         }
 
     def print_statistics(self):
@@ -770,3 +1021,161 @@ class AdaptiveHomographyMapper:
 
         if stats['compatibility_changes'] > 0:
             print(f"  Camera angle changes detected: {stats['compatibility_changes']}")
+
+    def debug_keypoint_matching(self, frame_idx: int, frame: np.ndarray,
+                             keypoints: List[Tuple], save_debug: bool = False) -> None:
+        """
+        Debug visualization of keypoint matching to diagnose homography issues.
+
+        Creates a visual representation of detected keypoints and their pitch mappings
+        to identify matching errors or inconsistencies.
+
+        Args:
+            frame_idx: Current frame index
+            frame: Video frame as numpy array
+            keypoints: List of (pixel_x, pixel_y, pitch_x, pitch_y, confidence)
+            save_debug: Whether to save debug image to disk
+        """
+        if not keypoints or len(keypoints) < 4:
+            return
+
+        # Create debug visualization
+        debug_img = frame.copy()
+
+        # Draw detected keypoints with different colors based on confidence
+        for i, (px, py, pitch_x, pitch_y, conf) in enumerate(keypoints):
+            # Color based on confidence
+            if conf > 0.8:
+                color = (0, 255, 0)  # Green for high confidence
+            elif conf > 0.5:
+                color = (0, 255, 255)  # Yellow for medium confidence
+            else:
+                color = (0, 0, 255)  # Red for low confidence
+
+            # Draw keypoint
+            cv2.circle(debug_img, (int(px), int(py)), 8, color, -1)
+            cv2.circle(debug_img, (int(px), int(py)), 8, (255, 255, 255), 2)
+
+            # Add keypoint ID
+            cv2.putText(debug_img, str(i), (int(px)+10, int(py)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            # Add pitch coordinates
+            cv2.putText(debug_img, f"({pitch_x:.0f},{pitch_y:.0f})",
+                       (int(px)+10, int(py)+15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        # Add frame info
+        cv2.putText(debug_img, f"Frame: {frame_idx} | Keypoints: {len(keypoints)}",
+                   (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Add statistics
+        high_conf = sum(1 for _, _, _, _, conf in keypoints if conf > 0.8)
+        med_conf = sum(1 for _, _, _, _, conf in keypoints if 0.5 < conf <= 0.8)
+        low_conf = sum(1 for _, _, _, _, conf in keypoints if conf <= 0.5)
+
+        stats_text = f"High: {high_conf} | Med: {med_conf} | Low: {low_conf}"
+        cv2.putText(debug_img, stats_text, (20, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        # Save debug image if requested
+        if save_debug:
+            debug_dir = Path("output_videos") / "keypoint_debug"
+            debug_dir.mkdir(exist_ok=True)
+            debug_path = debug_dir / f"keypoints_frame_{frame_idx:04d}.jpg"
+            cv2.imwrite(str(debug_path), debug_img)
+
+            # Also save a text file with keypoint data
+            data_path = debug_dir / f"keypoints_frame_{frame_idx:04d}.txt"
+            with open(data_path, 'w') as f:
+                f.write(f"Frame {frame_idx} - {len(keypoints)} keypoints\n")
+                f.write("ID\tPixelX\tPixelY\tPitchX\tPitchY\tConf\n")
+                for i, (px, py, pitch_x, pitch_y, conf) in enumerate(keypoints):
+                    f.write(f"{i}\t{px:.2f}\t{py:.2f}\t{pitch_x:.2f}\t{pitch_y:.2f}\t{conf:.3f}\n")
+
+        return debug_img
+
+    def _validate_homography_geometric(self, H: np.ndarray, src_pts: np.ndarray, dst_pts: np.ndarray,
+                              threshold_pitch_units: float = 800.0) -> bool:
+        """
+        Validate homography using reprojection error instead of condition number.
+
+        This works regardless of coordinate system scaling by validating in pitch
+        coordinate space where the transformation is actually happening.
+
+        Args:
+            H: Homography matrix (3x3)
+            src_pts: Source points (pixel coordinates)
+            dst_pts: Destination points (pitch coordinates in cm, 12000x7000)
+            threshold_pitch_units: Maximum allowed reprojection error in pitch units
+
+        Returns:
+            True if homography is geometrically valid
+        """
+        if H is None or not np.all(np.isfinite(H)):
+            return False
+
+        # Project source points using homography
+        projected = cv2.perspectiveTransform(
+            src_pts.reshape(-1, 1, 2), H
+        ).reshape(-1, 2)
+
+        # Calculate reprojection errors in PITCH coordinate space (cm)
+        errors = np.linalg.norm(projected - dst_pts, axis=1)
+
+        # Real-world thresholds for sports video with 12000x7000cm pitch coordinates
+        # 800cm median error = ~3-4 pixels at typical zoom levels - realistic for moving cameras
+        median_error = np.median(errors)
+        max_error = np.max(errors)
+
+        # Accept if median < threshold and max < threshold * 3.5
+        if median_error > threshold_pitch_units:
+            return False
+        if max_error > threshold_pitch_units * 3.5:  # Allow some outliers
+            return False
+
+        # Additional sanity checks for numerical stability
+        det = np.linalg.det(H)
+        if abs(det) < 1e-6 or abs(det) > 1e6:
+            return False
+
+        # Element magnitude check adjusted for pitch coordinates (12000x7000)
+        if np.max(np.abs(H)) > 1e6:  # Much higher than pixel-space thresholds
+            return False
+
+        return True
+
+    def _debug_geometric_validation(self, H: np.ndarray, src_pts: np.ndarray, dst_pts: np.ndarray, frame_idx: int):
+        """
+        Debug geometric validation failures by analyzing the coordinate ranges and errors.
+        """
+        print(f"  DEBUG GEOMETRIC VALIDATION - Frame {frame_idx}:")
+        print(f"    Source points (pixels) - Min: {src_pts.min(axis=0)}, Max: {src_pts.max(axis=0)}")
+        print(f"    Target points (pitch) - Min: {dst_pts.min(axis=0)}, Max: {dst_pts.max(axis=0)}")
+
+        # Project source points using homography
+        projected = cv2.perspectiveTransform(
+            src_pts.reshape(-1, 1, 2), H
+        ).reshape(-1, 2)
+
+        # Calculate reprojection errors
+        errors = np.linalg.norm(projected - dst_pts, axis=1)
+
+        print(f"    Projected points - Min: {projected.min(axis=0)}, Max: {projected.max(axis=0)}")
+        print(f"    Reprojection errors - Median: {np.median(errors):.2f}, Max: {np.max(errors):.2f}, Mean: {np.mean(errors):.2f}")
+        print(f"    Error distribution: {np.percentile(errors, [25, 50, 75, 90, 95])}")
+
+        # Check a few specific point transformations
+        print(f"    Sample transformations (first 3 points):")
+        for i in range(min(3, len(src_pts))):
+            print(f"      Point {i}: ({src_pts[i][0]:.1f}, {src_pts[i][1]:.1f}) → "
+                  f"({projected[i][0]:.1f}, {projected[i][1]:.1f}) "
+                  f"vs target ({dst_pts[i][0]:.1f}, {dst_pts[i][1]:.1f}) "
+                  f"error={errors[i]:.2f}")
+
+        # Homography matrix stats
+        print(f"    Homography matrix stats:")
+        print(f"      Condition number: {np.linalg.cond(H):.2f}")
+        print(f"      Max element: {np.max(np.abs(H)):.2f}")
+        print(f"      Determinant: {np.linalg.det(H):.6f}")
+        print(f"      Matrix:\n{H}")

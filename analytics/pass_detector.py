@@ -47,6 +47,11 @@ class PassDetector:
         """Calculate Euclidean distance between two points in meters."""
         if point1 is None or point2 is None:
             return 0.0
+
+        # Ensure we only use x, y coordinates (first 2 elements)
+        point1 = np.asarray(point1)[:2]
+        point2 = np.asarray(point2)[:2]
+
         return float(np.linalg.norm(point1 - point2))
 
     def _get_player_position(self, player_id: int, frame_idx: int,

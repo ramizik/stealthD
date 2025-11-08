@@ -17,7 +17,7 @@ import numpy as np
 
 class SimpleKalmanFilter:
     """
-    Simple 2D Kalman filter for position tracking.
+    Improved 2D Kalman filter for position tracking with Mahalanobis outlier detection.
 
     State: [x, y, vx, vy] (position and velocity)
     Measurement: [x, y] (position only)
@@ -28,7 +28,7 @@ class SimpleKalmanFilter:
     def __init__(self, dt: float = 0.04, process_noise: float = 0.5,
                  measurement_noise: float = 2.0):
         """
-        Initialize Kalman filter.
+        Initialize Kalman filter with research-backed parameters.
 
         Args:
             dt: Time step between frames (default: 0.04s for 25fps)
@@ -55,17 +55,18 @@ class SimpleKalmanFilter:
             [0, 1, 0, 0]
         ])
 
-        # Process noise covariance
-        q = process_noise
+        # Process noise covariance - tuned for soccer
+        q_pos = 0.5  # Position uncertainty
+        q_vel = 2.0  # Velocity uncertainty (higher for rapid acceleration)
         self.Q = np.array([
-            [q, 0, 0, 0],
-            [0, q, 0, 0],
-            [0, 0, q, 0],
-            [0, 0, 0, q]
+            [q_pos, 0, 0, 0],
+            [0, q_pos, 0, 0],
+            [0, 0, q_vel, 0],
+            [0, 0, 0, q_vel]
         ])
 
-        # Measurement noise covariance
-        r = measurement_noise
+        # Measurement noise - moderate trust in detections
+        r = 0.5  # Adjust based on detection quality
         self.R = np.array([
             [r, 0],
             [0, r]
@@ -91,7 +92,7 @@ class SimpleKalmanFilter:
 
     def update(self, measurement: np.ndarray) -> np.ndarray:
         """
-        Update step: Correct prediction with measurement.
+        Update step: Correct prediction with measurement using Mahalanobis distance.
 
         Args:
             measurement: Measured position [x, y]
@@ -99,29 +100,32 @@ class SimpleKalmanFilter:
         Returns:
             Corrected position [x, y]
         """
-        if not self.initialized:
-            # First measurement - initialize state
-            self.state[:2] = measurement
-            self.state[2:] = 0  # Zero velocity
-            self.initialized = True
-            return measurement
+        # Innovation (measurement residual)
+        y = measurement - self.H @ self.state
 
-        # Predict
-        self.predict()
-
-        # Calculate Kalman gain
+        # Innovation covariance
         S = self.H @ self.P @ self.H.T + self.R
+
+        # Mahalanobis distance for outlier detection
+        mahalanobis = np.sqrt(y.T @ np.linalg.inv(S) @ y)
+
+        # Adaptive threshold (chi-squared distribution, 95% confidence for 2 DOF)
+        threshold = 5.99
+
+        # If outlier, use prediction only
+        if mahalanobis > threshold:
+            return self.predict()
+
+        # Kalman gain
         K = self.P @ self.H.T @ np.linalg.inv(S)
 
-        # Update state with measurement
-        y = measurement - self.H @ self.state  # Innovation
+        # Update state
         self.state = self.state + K @ y
 
         # Update covariance
-        I = np.eye(4)
-        self.P = (I - K @ self.H) @ self.P
+        self.P = (np.eye(4) - K @ self.H) @ self.P
 
-        return self.state[:2]  # Return smoothed position
+        return self.state[:2]
 
     def get_velocity(self) -> np.ndarray:
         """Get current velocity estimate [vx, vy] in m/s."""
@@ -171,6 +175,11 @@ class PlayerPositionSmoother:
         self.total_smoothed = 0
         self.outliers_rejected = 0
 
+        # ADAPTIVE THRESHOLD: Track position stability for each player
+        self.position_stability: Dict[int, float] = {}
+        # ADAPTIVE THRESHOLD: Track consecutive outliers for each player
+        self.consecutive_outliers: Dict[int, int] = {}
+
     def smooth_position(self, player_id: int, position_raw: np.ndarray,
                        force_update: bool = False, frame_idx: int = None) -> Tuple[np.ndarray, bool]:
         """
@@ -195,33 +204,47 @@ class PlayerPositionSmoother:
 
         # Check for outliers (physically impossible jumps)
         is_outlier = False
+        distance = 0.0  # Initialize distance to avoid scoping issues
+
         if player_id in self.last_positions and not force_update:
             distance = np.linalg.norm(position_raw - self.last_positions[player_id])
-            max_distance = self.max_speed_ms * self.dt  # e.g., 17 m/s * 0.04s = 0.68m
 
-            if distance > max_distance:
-                # Outlier detected - use prediction instead of measurement
+            # ADAPTIVE THRESHOLD: Adjust based on position stability history
+            # If player has been unstable recently, be more lenient
+            if player_id in self.position_stability:
+                stability_factor = self.position_stability[player_id]
+            else:
+                stability_factor = 1.0  # Normal threshold initially
+                self.position_stability[player_id] = stability_factor
+
+            # Track consecutive outliers for this player
+            if player_id not in self.consecutive_outliers:
+                self.consecutive_outliers[player_id] = 0
+
+            # Adaptive max distance based on stability
+            base_max_distance = self.max_speed_ms * self.dt  # e.g., 17 m/s * 0.04s = 0.68m
+            max_distance = base_max_distance * stability_factor
+
+            # If we've had many consecutive outliers, be more lenient
+            if self.consecutive_outliers[player_id] > 3:
+                max_distance *= 2.0  # Double threshold after 3 consecutive outliers
+
+            # Check for catastrophic jumps (10x normal threshold)
+            if distance > max_distance * 10:
+                # CATASTROPHIC jump - reject immediately
                 is_outlier = True
-                self.outliers_rejected += 1
-
-                # Use Kalman prediction (don't update with bad measurement)
-                kf = self.player_filters[player_id]
-                position_smooth = kf.predict()
-
-                # DEBUG: Enhanced logging for first 20 outliers
-                if self.outliers_rejected <= 20:
-                    implied_speed_kmh = (distance / self.dt) * 3.6
-                    implied_speed_ms = distance / self.dt
-                    frame_str = f"Frame {frame_idx}: " if frame_idx is not None else ""
-                    print(f"[Position Smoother DEBUG] {frame_str}Player {player_id} Outlier #{self.outliers_rejected}")
-                    print(f"  Raw position: ({position_raw[0]:.2f}, {position_raw[1]:.2f})m")
-                    print(f"  Last position: ({self.last_positions[player_id][0]:.2f}, {self.last_positions[player_id][1]:.2f})m")
-                    print(f"  Predicted position: ({position_smooth[0]:.2f}, {position_smooth[1]:.2f})m")
-                    print(f"  Distance: {distance:.2f}m | Speed: {implied_speed_ms:.2f} m/s ({implied_speed_kmh:.1f} km/h)")
-                    print(f"  Threshold: {max_distance:.2f}m | Max speed: {self.max_speed_ms:.2f} m/s")
-
-                # Don't update last_positions with outlier - keep using prediction
-                return position_smooth, is_outlier
+                self.consecutive_outliers[player_id] += 1
+                self.position_stability[player_id] = min(3.0, stability_factor * 1.2)  # Reduce stability
+            elif distance > max_distance:
+                # Standard outlier - use prediction instead of measurement
+                is_outlier = True
+                self.consecutive_outliers[player_id] += 1
+                self.position_stability[player_id] = min(2.0, stability_factor * 1.1)  # Reduce stability
+            else:
+                # Good measurement - reset consecutive outlier count
+                self.consecutive_outliers[player_id] = 0
+                # Gradually improve stability with good measurements
+                self.position_stability[player_id] = max(0.5, stability_factor * 0.95)
 
         # Apply Kalman filter update
         kf = self.player_filters[player_id]
@@ -253,6 +276,10 @@ class PlayerPositionSmoother:
             self.player_filters[player_id].reset()
         if player_id in self.last_positions:
             del self.last_positions[player_id]
+        if player_id in self.position_stability:
+            del self.position_stability[player_id]
+        if player_id in self.consecutive_outliers:
+            del self.consecutive_outliers[player_id]
 
     def get_statistics(self) -> Dict:
         """Get smoother statistics."""

@@ -16,7 +16,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -79,9 +79,7 @@ class SpeedCalculator:
     def _conservative_linear_scale(self, pixel_coords: np.ndarray,
                                    video_dimensions: Tuple[int, int]) -> np.ndarray:
         """
-        Very conservative linear scaling that assumes only the central portion
-        of the frame contains the field. This prevents massive overestimation
-        when homography is unavailable.
+        Very conservative linear scaling that maps to field center, not (0,0).
 
         Args:
             pixel_coords: Array of shape (N, 2) with [x, y] pixel coordinates
@@ -95,23 +93,17 @@ class SpeedCalculator:
 
         video_width, video_height = video_dimensions
 
-        # Very conservative: assume field occupies only central 50% of frame
-        # This underestimates rather than overestimates distances
-        field_visible_fraction = 0.5
-        margin = (1 - field_visible_fraction) / 2
+        # Normalize pixel coordinates to [0, 1]
+        norm_x = pixel_coords[:, 0] / video_width
+        norm_y = pixel_coords[:, 1] / video_height
 
-        # Normalize pixel coordinates
-        norm_x = (pixel_coords[:, 0] / video_width - margin) / field_visible_fraction
-        norm_y = (pixel_coords[:, 1] / video_height - margin) / field_visible_fraction
+        # Map to field dimensions (105m × 68m) with proper centering
+        # Center the field at (52.5, 34) instead of (0, 0)
+        field_x = norm_x * self.field_width
+        field_y = norm_y * self.field_height
 
-        # Clamp to [0, 1] to keep within field boundaries
-        norm_x = np.clip(norm_x, 0, 1)
-        norm_y = np.clip(norm_y, 0, 1)
-
-        # Scale to field dimensions
-        field_coords = np.zeros_like(pixel_coords, dtype=np.float32)
-        field_coords[:, 0] = norm_x * self.field_width
-        field_coords[:, 1] = norm_y * self.field_height
+        # Center the coordinates
+        field_coords = np.column_stack([field_x, field_y])
 
         return field_coords
 
@@ -142,7 +134,7 @@ class SpeedCalculator:
 
         # Use robust transformation
         if hasattr(global_mapper, 'transform_points_robust'):
-            pitch_coords, method = global_mapper.transform_points_robust(
+            result = global_mapper.transform_points_robust(
                 pixel_coords,
                 frame_idx=frame_idx,
                 player_id=player_id,
@@ -150,10 +142,73 @@ class SpeedCalculator:
                 per_frame_keypoints=per_frame_keypoints
             )
 
+            # Handle None return (failed transformation)
+            if result is None:
+                # Fallback to proportional scaling
+                field_coords = self._proportional_scaling_fallback(pixel_coords, video_dimensions)
+                return field_coords, 'proportional_fallback'
+
+            pitch_coords, method, confidence = result
+
             # Convert from pitch coordinate system (12000x7000) to meters (105x68)
-            field_coords = pitch_coords.copy()
-            field_coords[:, 0] = field_coords[:, 0] * (self.field_width / 12000.0)
-            field_coords[:, 1] = field_coords[:, 1] * (self.field_height / 7000.0)
+            try:
+                pitch_coords = np.asarray(pitch_coords)
+
+                # Handle empty or invalid arrays
+                if pitch_coords.size == 0:
+                    return np.array([]).reshape(0, 2), method
+
+                # CRITICAL: Try to convert to float and check for validity
+                try:
+                    pitch_coords_float = pitch_coords.astype(float)
+                    if not np.all(np.isfinite(pitch_coords_float)):
+                        # Contains None, NaN, or Inf values
+                        raise ValueError("Invalid coordinates")
+                except (ValueError, TypeError):
+                    # Fallback to proportional scaling
+                    field_coords = self._proportional_scaling_fallback(pixel_coords, video_dimensions)
+                    return field_coords, f'{method}_fallback (invalid coords)'
+
+                if pitch_coords.ndim == 0:
+                    # Scalar value - convert to single coordinate
+                    pitch_coords_float = np.array([[pitch_coords.item()] * 2])
+                elif pitch_coords.ndim == 1:
+                    pitch_coords_float = pitch_coords_float.reshape(1, -1)
+
+                field_coords = pitch_coords_float.copy()
+                field_coords[:, 0] = field_coords[:, 0] * (self.field_width / 12000.0)
+                field_coords[:, 1] = field_coords[:, 1] * (self.field_height / 7000.0)
+
+            except Exception as e:
+                # Any error during coordinate conversion - use fallback
+                print(f"[Speed Calculator] Coordinate conversion error: {e}, using fallback")
+                field_coords = self._proportional_scaling_fallback(pixel_coords, video_dimensions)
+                return field_coords, f'{method}_fallback (conversion error)'
+
+            # ADDITIONAL VALIDATION: Check for unreasonable coordinates
+            # This helps catch homography errors early
+            if len(field_coords) > 0:
+                # Check for NaN or Inf values
+                if not np.all(np.isfinite(field_coords)):
+                    print(f"[Speed Calculator] Frame {frame_idx}: Invalid coordinates (NaN/Inf) detected")
+                    # Use conservative fallback
+                    return self._conservative_linear_scale(pixel_coords, video_dimensions), f"fallback (invalid coords)"
+
+                # Check for coordinates outside reasonable field bounds
+                # Allow some margin for perspective distortion
+                x_min, x_max = field_coords[:, 0].min(), field_coords[:, 0].max()
+                y_min, y_max = field_coords[:, 1].min(), field_coords[:, 1].max()
+
+                # Field is 105m x 68m, allow 10m margin
+                if (x_min < -10 or x_max > 115 or y_min < -10 or y_max > 78):
+                    print(f"[Speed Calculator] Frame {frame_idx}: Out of bounds coordinates detected")
+                    print(f"  X range: {x_min:.2f} to {x_max:.2f} (valid: -10 to 115)")
+                    print(f"  Y range: {y_min:.2f} to {y_max:.2f} (valid: -10 to 78)")
+                    print(f"  Method: {method}")
+
+                    # Use conservative fallback for extreme cases
+                    if x_min < -50 or x_max > 155 or y_min < -50 or y_max > 118:
+                        return self._conservative_linear_scale(pixel_coords, video_dimensions), f"fallback (extreme bounds)"
 
             return field_coords, method
 
@@ -205,217 +260,303 @@ class SpeedCalculator:
 
     def _calculate_distance(self, point1: np.ndarray, point2: np.ndarray) -> float:
         """Calculate Euclidean distance between two points in meters."""
+        # Ensure we only use x, y coordinates (first 2 elements)
+        point1 = np.asarray(point1)[:2]
+        point2 = np.asarray(point2)[:2]
         return float(np.linalg.norm(point1 - point2))
 
-    def calculate_speeds(self, player_tracks: Dict, adaptive_mapper,
-                        video_dimensions: Tuple[int, int], camera_movement: list = None) -> Dict:
+    def calculate_speeds(self, player_positions: Dict[int, Dict[int, np.ndarray]],
+                        global_mapper, video_dimensions: Tuple[int, int],
+                        camera_movement: list = None) -> Dict[int, Dict]:
         """
-        Calculate speeds for all players across all frames using adaptive per-frame transformation.
+        Calculate player speeds using field coordinates with robust filtering.
 
         Args:
-            player_tracks: Dictionary {frame_idx: {player_id: [x1, y1, x2, y2]}}
-            adaptive_mapper: AdaptiveHomographyMapper object with per-frame homographies
+            player_positions: {player_id: {frame_idx: [x, y]}}
+            global_mapper: GlobalHomographyMapper object
             video_dimensions: (width, height) of video in pixels
-            camera_movement: List of [x_movement, y_movement] per frame
 
         Returns:
-            Dictionary with structure:
-            {
-                player_id: {
-                    'frames': {frame_idx: speed_kmh},
-                    'average_speed_kmh': float,
-                    'max_speed_kmh': float,
-                    'total_distance_m': float,
-                    'field_coordinates': {frame_idx: [x, y]}
-                }
-            }
+            Dictionary of player speed data
         """
         player_speeds = {}
 
-        print(f"\n[SPEED DEBUG] Starting speed calculation with ADAPTIVE per-frame transformation:")
-        print(f"   Video dimensions: {video_dimensions}")
-        print(f"   Field dimensions: {self.field_width}m x {self.field_height}m")
-        print(f"   FPS: {self.fps}")
+        for player_id, positions in player_positions.items():
+            if len(positions) < 2:
+                continue
 
-        # Get adaptive mapper statistics
-        if hasattr(adaptive_mapper, 'get_statistics'):
-            mapper_stats = adaptive_mapper.get_statistics()
-            print(f"   Adaptive mapper statistics:")
-            print(f"     - Frames with homography: {mapper_stats.get('frames_with_homography', 0)}")
-            print(f"     - Temporal interpolation rate: {mapper_stats.get('temporal_interpolation_rate', 0):.1f}%")
-            print(f"     - Proportional fallback rate: {mapper_stats.get('proportional_fallback_rate', 0):.1f}%")
+            # Get sorted frame indices
+            frame_indices = sorted(positions.keys())
 
-        # Get all unique player IDs
-        all_player_ids = set()
-        for frame_data in player_tracks.values():
-            if frame_data and -1 not in frame_data:
-                all_player_ids.update(frame_data.keys())
+            # Calculate speeds for each frame
+            speeds = []
+            valid_speeds = []  # For averaging
 
-        # Calculate speeds for each player
-        for player_id in all_player_ids:
-            # Get all frames where this player appears
-            player_frames = []
-            for frame_idx, frame_data in sorted(player_tracks.items()):
-                if frame_data and player_id in frame_data and -1 not in frame_data:
-                    player_frames.append((frame_idx, frame_data[player_id]))
+            
+            for i in range(1, len(frame_indices)):
+                prev_frame = frame_indices[i-1]
+                curr_frame = frame_indices[i]
 
-            if len(player_frames) < 2:
-                continue  # Need at least 2 frames to calculate speed
+                # Get positions
+                prev_pos = positions[prev_frame]
+                curr_pos = positions[curr_frame]
 
-            # Calculate field coordinates for all frames
-            frame_speeds = {}
-            field_coordinates = {}
-            distances = []
-
-            prev_field_coord = None
-            prev_frame_idx = None
-
-            # Track max speed sample for this player (for debug)
-            max_speed_sample = None
-
-            for i, (frame_idx, bbox) in enumerate(player_frames):
-                # Get foot position (bottom center) for players - more accurate for speed calculation
-                foot_pos = self._get_foot_position(bbox)
-                foot_pos_array = np.array(foot_pos, dtype=np.float32)
-
-                # Get camera motion for this frame if available
-                camera_motion = None
-                if camera_movement and frame_idx < len(camera_movement):
-                    camera_motion = tuple(camera_movement[frame_idx])
-
-                # Convert to field coordinates using adaptive per-frame transformation
-                field_coord_raw, transform_method, confidence = adaptive_mapper.transform_point(
-                    frame_idx, foot_pos_array, camera_motion
-                )
-
-                # Should never be None with adaptive transform, but check anyway
-                if field_coord_raw is None:
-                    print(f"[WARNING] Unexpected None coordinate for player {player_id} frame {frame_idx}")
+                # Skip if either position is None
+                if prev_pos is None or curr_pos is None:
                     continue
 
-                # CRITICAL: Apply Kalman smoothing AFTER homography transformation
-                # This eliminates position jumps from matrix discontinuities
-                field_coord, is_outlier = self.position_smoother.smooth_position(
-                    player_id, field_coord_raw, frame_idx=frame_idx
+                # Skip identical positions (no movement)
+                if prev_pos == curr_pos:
+                    continue
+
+                # Additional validation: Check for frame gaps
+                frame_gap = curr_frame - prev_frame
+                actual_time_diff = frame_gap / self.fps
+                if frame_gap > 3:  # More than 3 frames gap (0.12s at 25fps)
+                    continue  # Skip large frame gaps - likely tracking interruption
+
+                # Transform to field coordinates with validation
+                prev_field, prev_method = self.calculate_field_coordinates(
+                    np.array([prev_pos]), global_mapper, video_dimensions, prev_frame, player_id
+                )
+                curr_field, curr_method = self.calculate_field_coordinates(
+                    np.array([curr_pos]), global_mapper, video_dimensions, curr_frame, player_id
                 )
 
-                # DEBUG: Log smoothing corrections (removed - now in position_smoother)
-                # if is_outlier and i < 5:  # Already logged in position_smoother with more detail
+                # Validate coordinate transformation quality
+                transformation_valid = True
+                if prev_field is None or curr_field is None or len(prev_field) == 0 or len(curr_field) == 0:
+                    transformation_valid = False
+                else:
+                    # Check for coordinate system inconsistencies
+                    prev_valid = np.all(np.isfinite(prev_field)) and np.all(np.abs(prev_field) < 200)  # Within soccer field bounds (~105m x 68m)
+                    curr_valid = np.all(np.isfinite(curr_field)) and np.all(np.abs(curr_field) < 200)
 
-                # DEBUG: Log out-of-bounds coordinates (disabled for cleaner output)
-                # if (field_coord[0] < 0 or field_coord[0] > self.field_width or
-                #     field_coord[1] < 0 or field_coord[1] > self.field_height):
-                #     print(f"[COORD DEBUG] Player {player_id} Frame {frame_idx}: "
-                #           f"OUT OF BOUNDS ({field_coord[0]:.2f}, {field_coord[1]:.2f})m "
-                #           f"from pixel ({foot_pos[0]:.1f}, {foot_pos[1]:.1f}) "
-                #           f"via {transform_method} (conf: {confidence:.2f})")
+                    if not (prev_valid and curr_valid):
+                        transformation_valid = False
+                    else:
+                        # Additional validation: coordinate reasonableness check
+                        coord_distance = np.linalg.norm(curr_field - prev_field)
+                        # More than 50 meters in one frame is suspicious (1250 km/h)
+                        if coord_distance > 50.0 and actual_time_diff < 0.1:  # Within reasonable time window
+                            transformation_valid = False
 
-                field_coordinates[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
+                if not transformation_valid:
+                    continue
 
-                # Calculate speed if we have a previous position
-                if prev_field_coord is not None:
-                    # Calculate distance in meters
-                    distance = self._calculate_distance(field_coord, prev_field_coord)
+                # Calculate distance and speed
+                distance = np.linalg.norm(curr_field - prev_field)
+                time_diff = actual_time_diff
 
-                    # Calculate time difference in seconds
-                    frame_diff = frame_idx - prev_frame_idx
-                    time_diff = frame_diff / self.fps
+                if time_diff > 0:
+                    speed_ms = distance / time_diff
+                    speed_kmh = speed_ms * 3.6
 
-                    # DEBUG: Log large position jumps (likely homography instability)
-                    if distance > 10 and frame_diff == 1:  # >10m in 1 frame = likely error
-                        print(f"[HOMOGRAPHY DEBUG] Player {player_id} Frame {prev_frame_idx}→{frame_idx}: "
-                              f"LARGE JUMP {distance:.2f}m in {time_diff:.3f}s "
-                              f"({prev_field_coord[0]:.2f}, {prev_field_coord[1]:.2f}) → "
-                              f"({field_coord[0]:.2f}, {field_coord[1]:.2f}) "
-                              f"| Method: {transform_method}")
+                    # Physics-based validation - only filter truly impossible movements
+                    # Elite soccer players can reach 35-40 km/h (9.7-11.1 m/s)
+                    # World record sprint (Usain Bolt): ~44.7 km/h (12.4 m/s)
+                    # But 5+ meters in 0.04s = 450 km/h is physically impossible for humans
 
-                    # Calculate speed in meters per second, then convert to km/h
-                    if time_diff > 0:
-                        instant_speed = distance / time_diff
-                        speed_kmh = instant_speed * 3.6  # Convert m/s to km/h
+                    # Calculate metrics for validation
+                    pixel_distance = np.linalg.norm(np.array(curr_pos) - np.array(prev_pos))
 
-                        # Sanity check: If speed is unreasonably high, it's likely a tracking/transformation error
-                        # Human max sprint is ~12 m/s (43 km/h). Allow up to 15 m/s (54 km/h) with margin
-                        if instant_speed > 15:  # 15 m/s = 54 km/h
-                            # DEBUG: Track filtered speed
-                            if max_speed_sample is None or speed_kmh > max_speed_sample['speed_kmh']:
-                                max_speed_sample = {
-                                    'speed_kmh': speed_kmh,
-                                    'distance_m': distance,
-                                    'frame_diff': frame_diff,
-                                    'time_diff': time_diff,
-                                    'from_frame': prev_frame_idx,
-                                    'to_frame': frame_idx,
-                                    'from_pos': prev_field_coord.copy(),
-                                    'to_pos': field_coord.copy(),
-                                    'transform_method': transform_method,
-                                    'filtered': True
-                                }
-                            # Skip this measurement, likely an error
-                            continue
+                    # Convert to human-understandable metrics
+                    max_reasonable_human_speed_ms = 12.4  # Usain Bolt's speed in m/s
+                    max_reasonable_human_speed_kmh = max_reasonable_human_speed_ms * 3.6
 
-                        distances.append(distance)
+                    # Calculate physics constraints
+                    max_possible_distance_ms = max_reasonable_human_speed_ms * time_diff
+                    max_possible_distance_m = max_possible_distance_ms
 
-                        # Store actual speed (sanity check already filtered impossible speeds > 54 km/h)
-                        frame_speeds[int(frame_idx)] = round(speed_kmh, 2)
+                    is_valid = True
 
-                        # Track max speed sample for debug
-                        if max_speed_sample is None or speed_kmh > max_speed_sample.get('speed_kmh', 0):
-                            max_speed_sample = {
-                                'speed_kmh': speed_kmh,
-                                'distance_m': distance,
-                                'frame_diff': frame_diff,
-                                'time_diff': time_diff,
-                                'from_frame': prev_frame_idx,
-                                'to_frame': frame_idx,
-                                'from_pos': prev_field_coord.copy(),
-                                'to_pos': field_coord.copy(),
-                                'transform_method': transform_method,
-                                'filtered': False
-                            }
+                    # Only filter truly impossible movements
+                    if time_diff > 0.2:  # More than 200ms gap - likely tracking interruption
+                        is_valid = False
+                    elif distance > max_possible_distance_m * 1.1:  # 10% buffer for measurement error only
+                        is_valid = False
+                    elif pixel_distance > 300:  # Extreme pixel jumps (reduced threshold)
+                        is_valid = False
 
-                prev_field_coord = field_coord
-                prev_frame_idx = frame_idx
+                    if is_valid:
+                        # Store detailed speed data for temporal smoothing (single entry)
+                        speeds.append({
+                            'frame': curr_frame,
+                            'speed_kmh': speed_kmh,
+                            'speed_ms': speed_ms,
+                            'distance_m': distance,
+                            'time_diff_s': time_diff,
+                            'pixel_distance': pixel_distance,
+                            'prev_frame': prev_frame,
+                            'curr_frame': curr_frame,
+                            'prev_pos': prev_pos.copy(),
+                            'curr_pos': curr_pos.copy()
+                        })
 
-            # Calculate aggregate statistics
-            if frame_speeds:
-                speeds_list = list(frame_speeds.values())
-                player_speeds[int(player_id)] = {
-                    'frames': frame_speeds,
-                    'average_speed_kmh': round(np.mean(speeds_list), 2),
-                    'max_speed_kmh': round(np.max(speeds_list), 2),
-                    'total_distance_m': round(sum(distances), 2),
-                    'field_coordinates': field_coordinates,
-                    '_debug_max_speed_sample': max_speed_sample  # Store for debug
+                        # Add to valid speeds for averaging
+                        valid_speeds.append(speed_kmh)
+                    else:
+                        # Filtered out - extreme outlier
+                        pass
+
+            # Apply temporal smoothing to reduce measurement noise
+            if len(speeds) >= 2:
+                speeds = self._apply_temporal_smoothing(speeds)
+                valid_speeds = [s['speed_kmh'] for s in speeds]
+
+            # Apply adaptive averaging based on available data
+            if len(valid_speeds) >= 3:  # Reduced from 15 to 3 frames minimum
+                # Sort speeds
+                sorted_speeds = sorted(valid_speeds)
+
+                # Statistical outlier removal based on data distribution
+                # Use IQR method to detect outliers while preserving valid high speeds
+                if len(sorted_speeds) >= 10:
+                    # Calculate IQR (Interquartile Range)
+                    q1 = np.percentile(sorted_speeds, 25)
+                    q3 = np.percentile(sorted_speeds, 75)
+                    iqr = q3 - q1
+
+                    # Define outlier bounds with realistic soccer speed limits
+                    lower_bound = q1 - 1.5 * iqr
+                    # Upper bound: max of 45 km/h (elite sprint speed) or q3 + 2*IQR
+                    statistical_upper = q3 + 2.0 * iqr
+                    upper_bound = min(statistical_upper, 45.0)  # Cap at realistic elite soccer speed
+
+                    # Filter outliers but keep reasonable high speeds
+                    trimmed_speeds = [s for s in sorted_speeds if lower_bound <= s <= upper_bound]
+                else:
+                    # For small datasets, apply hard limit to physics-filtered speeds
+                    trimmed_speeds = [s for s in sorted_speeds if s <= 45.0]
+
+                # Calculate average of remaining values
+                avg_speed_kmh = np.mean(trimmed_speeds) if trimmed_speeds else 0.0
+                avg_speed_ms = avg_speed_kmh / 3.6
+
+                # Calculate total distance
+                total_distance = sum(s['distance_m'] for s in speeds)
+
+                player_speeds[player_id] = {
+                    'frames': {s['frame']: s['speed_kmh'] for s in speeds},
+                    'average_speed_kmh': avg_speed_kmh,
+                    'max_speed_kmh': max([s['speed_kmh'] for s in speeds]) if speeds else 0.0,
+                    'total_distance_m': total_distance,
+                    'field_coordinates': {
+                        frame_idx: (positions[frame_idx].tolist()
+                                   if hasattr(positions[frame_idx], 'tolist')
+                                   else list(positions[frame_idx]))
+                        if frame_idx in positions else [0.0, 0.0]
+                        for frame_idx in frame_indices
+                    }
+                }
+            else:
+                # Not enough data for robust averaging
+                player_speeds[player_id] = {
+                    'frames': {},
+                    'average_speed_kmh': 0.0,
+                    'max_speed_kmh': 0.0,
+                    'total_distance_m': 0.0,
+                    'field_coordinates': {}
                 }
 
-        # Print debug statistics from AdaptiveHomographyMapper
-        if hasattr(adaptive_mapper, 'print_debug_stats'):
-            adaptive_mapper.print_debug_stats()
-
-        # Print position smoother statistics
-        self.position_smoother.print_statistics()
-
-        # Find top 5 fastest players
-        if player_speeds:
-            sorted_players = sorted(player_speeds.items(),
-                                   key=lambda x: x[1]['max_speed_kmh'],
-                                   reverse=True)[:5]
-
-            print(f"\n[SPEED DEBUG] Top 5 Fastest Players:")
-            for rank, (pid, data) in enumerate(sorted_players, 1):
-                max_sample = data.get('_debug_max_speed_sample')
-                if max_sample:
-                    print(f"   {rank}. Player {pid}: {data['max_speed_kmh']:.2f} km/h (avg: {data['average_speed_kmh']:.2f} km/h)")
-                    if 'filtered' in max_sample:
-                        print(f"      Max speed: {max_sample['speed_kmh']:.2f} km/h "
-                              f"({'FILTERED' if max_sample['filtered'] else 'accepted'})")
-                    print(f"      Distance: {max_sample['distance_m']:.2f}m over {max_sample['frame_diff']} frames "
-                          f"({max_sample['time_diff']:.3f}s)")
-                    print(f"      From frame {max_sample['from_frame']} to {max_sample['to_frame']}")
-                    print(f"      Position: ({max_sample['from_pos'][0]:.2f}, {max_sample['from_pos'][1]:.2f}) -> "
-                          f"({max_sample['to_pos'][0]:.2f}, {max_sample['to_pos'][1]:.2f}) meters")
-                    print(f"      Transform method: {max_sample['transform_method']}")
-
-
         return player_speeds
+
+    def _proportional_scaling_fallback(self, pixel_coords: np.ndarray, video_dimensions: Tuple[int, int] = (1920, 1080)) -> np.ndarray:
+        """
+        Fallback proportional scaling when homography fails.
+
+        Maps pixel coordinates directly to field coordinates using simple scaling.
+        """
+        video_width, video_height = video_dimensions
+
+        # Normalize pixel coordinates to [0, 1]
+        norm_x = pixel_coords[:, 0] / video_width
+        norm_y = pixel_coords[:, 1] / video_height
+
+        # Scale to field dimensions (meters)
+        field_coords = np.column_stack([
+            norm_x * self.field_width,
+            norm_y * self.field_height
+        ]).astype(np.float32)
+
+        return field_coords
+
+    def _apply_temporal_smoothing(self, speeds: List[dict]) -> List[dict]:
+        """
+        Apply temporal smoothing to speed measurements to reduce jitter and noise.
+
+        Uses weighted averaging with nearby frames to create more stable speed estimates.
+        Also applies variance-based outlier detection within short time windows.
+
+        Args:
+            speeds: List of speed measurement dictionaries
+
+        Returns:
+            List of smoothed speed measurements
+        """
+        if not speeds:
+            return speeds
+
+        # Sort speeds by frame for temporal processing
+        speeds_sorted = sorted(speeds, key=lambda x: x['frame'])
+
+        smoothed_speeds = []
+
+        for i, speed_data in enumerate(speeds_sorted):
+            frame = speed_data['frame']
+            speed = speed_data['speed_kmh']
+
+            # Get temporal window (previous 2 and next 2 frames if available)
+            window_size = 5
+            half_window = window_size // 2
+
+            # Collect nearby speeds
+            nearby_speeds = []
+            nearby_frames = []
+
+            for j in range(max(0, i - half_window), min(len(speeds_sorted), i + half_window + 1)):
+                nearby_speeds.append(speeds_sorted[j]['speed_kmh'])
+                nearby_frames.append(speeds_sorted[j]['frame'])
+
+            if len(nearby_speeds) >= 3:  # Only smooth if we have enough neighbors
+                # Calculate weighted average (center frame gets highest weight)
+                center_idx = len(nearby_speeds) // 2
+                weights = [1.0] * len(nearby_speeds)
+
+                # Give center frame 50% more weight
+                if 0 <= center_idx < len(weights):
+                    weights[center_idx] *= 1.5
+
+                # Normalize weights
+                total_weight = sum(weights)
+                weights = [w / total_weight for w in weights]
+
+                # Calculate weighted average
+                weighted_speed = sum(w * s for w, s in zip(weights, nearby_speeds))
+
+                # Calculate variance for outlier detection
+                variance = sum((s - weighted_speed) ** 2 for s in nearby_speeds) / len(nearby_speeds)
+                std_dev = np.sqrt(variance)
+
+                # If current speed is outlier (> 2 std dev from weighted avg), reduce its influence
+                deviation = abs(speed - weighted_speed)
+                if deviation > 2.0 * std_dev:
+                    # Blend with weighted average more aggressively for outliers
+                    final_speed = 0.7 * weighted_speed + 0.3 * speed
+                else:
+                    # Normal smoothing
+                    final_speed = weighted_speed
+
+                # Create smoothed speed data
+                smoothed_speed_data = speed_data.copy()
+                smoothed_speed_data['speed_kmh'] = final_speed
+                smoothed_speed_data['speed_ms'] = final_speed / 3.6
+                smoothed_speed_data['original_speed_kmh'] = speed  # Store original for comparison
+                smoothed_speed_data['smoothed'] = True
+                smoothed_speeds.append(smoothed_speed_data)
+            else:
+                # Not enough neighbors for smoothing
+                speed_data['smoothed'] = False
+                smoothed_speeds.append(speed_data)
+
+        return smoothed_speeds

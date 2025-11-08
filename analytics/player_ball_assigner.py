@@ -36,6 +36,11 @@ class PlayerBallAssigner:
         """Calculate Euclidean distance between two points in meters."""
         if point1 is None or point2 is None:
             return float('inf')
+
+        # Ensure we only use x, y coordinates (first 2 elements)
+        point1 = np.asarray(point1)[:2]
+        point2 = np.asarray(point2)[:2]
+
         return float(np.linalg.norm(point1 - point2))
 
     def assign_ball_to_player(self, player_positions: Dict[int, np.ndarray],

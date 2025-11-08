@@ -138,8 +138,22 @@ class MetricsCalculator:
         # Step 1: Calculate player speeds and field coordinates
         print("  - Calculating player speeds and field coordinates...")
 
+        # Transform player_tracks from {frame: {player_id: bbox}} to {player_id: {frame: center}}
+        player_positions_by_id = {}
+        for frame_idx, frame_players in player_tracks.items():
+            for player_id, bbox in frame_players.items():
+                if player_id not in player_positions_by_id:
+                    player_positions_by_id[player_id] = {}
+                # Calculate center of bounding box
+                if len(bbox) >= 4:
+                    center_x = (bbox[0] + bbox[2]) / 2
+                    center_y = (bbox[1] + bbox[3]) / 2
+                    player_positions_by_id[player_id][int(frame_idx)] = [center_x, center_y]
+
+        print(f"  Transformed {len(player_tracks)} frames of tracking data for {len(player_positions_by_id)} players")
+
         player_speeds = self.speed_calculator.calculate_speeds(
-            player_tracks, adaptive_mapper, video_dimensions, camera_movement
+            player_positions_by_id, adaptive_mapper, video_dimensions, camera_movement
         )
 
         # Clear memory after speed calculation
