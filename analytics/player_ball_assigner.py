@@ -32,8 +32,65 @@ class PlayerBallAssigner:
         """
         self.max_ball_distance = max_ball_distance
 
-    def _calculate_distance(self, point1: np.ndarray, point2: np.ndarray) -> float:
-        """Calculate Euclidean distance between two points in meters."""
+    def _normalize_coordinates_to_meters(self, point: np.ndarray, reference_ball_coords: Dict) -> np.ndarray:
+        """
+        Normalize coordinates to meters using ball coordinates as reference.
+
+        The system uses different coordinate systems:
+        - Ball coordinates are already in meters (field coordinates)
+        - Player coordinates appear to be in a different scale (~9.4x larger)
+
+        This method detects the coordinate system and converts to meters.
+        """
+        point = np.asarray(point)[:2]
+
+        # If point is already in meters (typical field range), return as-is
+        if 0 <= point[0] <= 120 and 0 <= point[1] <= 80:  # Reasonable field bounds in meters
+            return point
+
+        # Calculate conversion factor based on reference ball coordinates
+        if len(reference_ball_coords) > 0:
+            # Get average ball coordinate as reference (should be in meters)
+            ball_coords = list(reference_ball_coords.values())
+            avg_ball_x = np.mean([c[0] for c in ball_coords])
+            avg_ball_y = np.mean([c[1] for c in ball_coords])
+
+            # If ball coordinates are in reasonable meter range, use them to estimate conversion
+            if 0 <= avg_ball_x <= 120 and 0 <= avg_ball_y <= 80:
+                # Estimate that player coordinates should be in similar field coordinate range
+                # but they appear to be scaled up by a factor
+                # Use the ratio to estimate the scaling factor
+                scaling_factor = (avg_ball_x + avg_ball_y) / (point[0] + point[1]) * 2
+
+                # Apply scaling to bring coordinates to meter range
+                point_meters = point * scaling_factor
+
+                # Validate the result is in reasonable field bounds
+                if 0 <= point_meters[0] <= 120 and 0 <= point_meters[1] <= 80:
+                    return point_meters
+
+        # If point appears to be in pitch coordinates (12000x7000), convert to meters
+        if point[0] > 1000 or point[1] > 1000:
+            # Convert from pitch coordinates (12000x7000) to meters (105x68)
+            point_meters = np.array([
+                point[0] * (105.0 / 12000.0),
+                point[1] * (68.0 / 7000.0)
+            ])
+            return point_meters
+
+        # Fallback: estimate scaling based on typical coordinate patterns
+        # For our specific case, player coords seem to be ~9-10x ball coords
+        if point[0] > 200:  # Likely in the wrong coordinate system
+            # Use empirical scaling factor based on observed data
+            point_meters = point * 0.11  # Approximate scaling factor
+            return point_meters
+
+        # Default: return as-is if we can't determine the system
+        return point
+
+    def _calculate_distance(self, point1: np.ndarray, point2: np.ndarray,
+                           ball_coords_ref: Dict = None) -> float:
+        """Calculate Euclidean distance between two points in meters with coordinate normalization."""
         if point1 is None or point2 is None:
             return float('inf')
 
@@ -41,16 +98,23 @@ class PlayerBallAssigner:
         point1 = np.asarray(point1)[:2]
         point2 = np.asarray(point2)[:2]
 
+        # Normalize coordinates to meters if needed
+        if ball_coords_ref is not None:
+            point1 = self._normalize_coordinates_to_meters(point1, ball_coords_ref)
+            point2 = self._normalize_coordinates_to_meters(point2, ball_coords_ref)
+
         return float(np.linalg.norm(point1 - point2))
 
     def assign_ball_to_player(self, player_positions: Dict[int, np.ndarray],
-                              ball_position: Optional[np.ndarray]) -> Optional[int]:
+                              ball_position: Optional[np.ndarray],
+                              ball_coords_ref: Dict = None) -> Optional[int]:
         """
         Assign ball to closest player within threshold distance.
 
         Args:
             player_positions: Dictionary {player_id: np.array([x, y])} in field coordinates
             ball_position: Ball position as np.array([x, y]) in field coordinates, or None
+            ball_coords_ref: Reference ball coordinates for coordinate system normalization
 
         Returns:
             player_id of player assigned to ball, or None if no player within threshold
@@ -63,7 +127,7 @@ class PlayerBallAssigner:
 
         for player_id, player_pos in player_positions.items():
             if player_pos is not None:
-                distance = self._calculate_distance(player_pos, ball_position)
+                distance = self._calculate_distance(player_pos, ball_position, ball_coords_ref)
 
                 if distance < self.max_ball_distance:
                     if distance < min_distance:
@@ -108,8 +172,8 @@ class PlayerBallAssigner:
                 if ball_coords is not None and len(ball_coords) == 2:
                     ball_position = np.array(ball_coords)
 
-            # Assign ball to player
-            assigned_player = self.assign_ball_to_player(player_positions, ball_position)
+            # Assign ball to player (pass ball coordinates reference for coordinate normalization)
+            assigned_player = self.assign_ball_to_player(player_positions, ball_position, field_coords_ball)
 
             if assigned_player is not None:
                 ball_assignments[int(frame_idx)] = int(assigned_player)

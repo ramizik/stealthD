@@ -17,8 +17,8 @@ from typing import Dict, Tuple
 import numpy as np
 import supervision as sv
 
-from .pass_detector import PassDetector
-from .player_ball_assigner import PlayerBallAssigner
+from .robust_pass_detector import RobustPassDetector as EnhancedPassDetector
+from .improved_player_ball_assigner import ImprovedPlayerBallAssigner
 from .possession_tracker import PossessionTracker
 from .speed_calculator import SpeedCalculator
 
@@ -32,31 +32,25 @@ class MetricsCalculator:
     """
 
     def __init__(self, fps: float = 30, field_dimensions: Tuple[float, float] = (105, 68)):
-        """
-        Initialize the metrics calculator.
-
-        Args:
-            fps: Frames per second of the video
-            field_dimensions: (width, height) in meters. Default: (105, 68)
-        """
         self.fps = fps
         self.field_dimensions = field_dimensions
         self.speed_calculator = SpeedCalculator(field_dimensions, fps)
-        # Enhanced possession tracker with aligned parameters
         self.possession_tracker = PossessionTracker(
-            possession_threshold=2.0,  # Match max_ball_distance for consistent detection
-            min_possession_frames=1  # Capture even brief 1-frame touches (one-touch passes)
+            possession_threshold=8.0,
+            min_possession_frames=1
         )
-        # Enhanced pass detector with hybrid validation
-        self.pass_detector = PassDetector(
-            min_pass_distance=1.0,       # Allow short passes (reduced from 2.5m)
-            min_possession_duration=0.0, # No minimum duration - allow instant one-touch passes
-            max_gap_frames=100,          # Allow up to 4 seconds ball flight time (includes loose balls)
-            max_pass_distance=40.0,      # Ignore unrealistic long distances
-            velocity_threshold=2.0       # Minimum ball speed for valid passes (m/s)
+
+        # NEW: Enhanced components
+        self.pass_detector = EnhancedPassDetector(
+            min_pass_distance=0.3,       # More permissive
+            max_pass_distance=70.0,      # Allow longer passes
+            max_gap_frames=150,          # 5 seconds
+            velocity_threshold=0.5,      # Lower threshold
+            min_ball_movement=2.0        # Ball must move 2m
         )
-        self.ball_assigner = PlayerBallAssigner(
-            max_ball_distance=2.0  # Reduced from 2.5m for more accurate touch detection
+
+        self.ball_assigner = ImprovedPlayerBallAssigner(
+            max_ball_distance=10.0       # Increased from 8.0m
         )
 
     def _calculate_ball_field_coordinates(self, ball_tracks: Dict, adaptive_mapper,
@@ -101,7 +95,7 @@ class MetricsCalculator:
         return ball_field_coords
 
     def calculate_all_metrics(self, all_tracks: Dict, adaptive_mapper,
-                             video_info: sv.VideoInfo, camera_movement: list = None) -> Dict:
+                             video_info: sv.VideoInfo, camera_movement: list = None, id_mapping: Dict = None) -> Dict:
         """
         Calculate all analytics metrics from tracking data using adaptive homography.
 
@@ -183,10 +177,19 @@ class MetricsCalculator:
         gc.collect()
 
         # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
+        # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
         print("  - Assigning ball to players frame-by-frame...")
-        ball_assignments = self.ball_assigner.assign_ball_for_all_frames(
+        ball_assignments_with_distance = self.ball_assigner.assign_ball_for_all_frames(
             player_tracks, ball_tracks, player_speeds, ball_field_coords
         )
+
+        # Analyze assignment quality
+        quality = self.ball_assigner.analyze_assignment_quality(ball_assignments_with_distance)
+        print(f"    Ball assignment quality: avg_dist={quality['avg_distance']:.2f}m, "
+            f"assignments={quality['total_assignments']}")
+
+        # Get simple mapping for touch detection
+        ball_assignments = self.ball_assigner.get_simple_assignments(ball_assignments_with_distance)
 
         # Count touches from frame-by-frame assignments
         player_touches = self.ball_assigner.count_player_touches(ball_assignments)
@@ -200,7 +203,8 @@ class MetricsCalculator:
         passes = self.pass_detector.detect_passes(
             possession_events, player_speeds, team_assignments, self.fps,
             ball_field_coords=ball_field_coords,  # For velocity validation
-            ball_assignments=ball_assignments      # For touch validation
+            ball_assignments=ball_assignments,     # For touch validation
+            id_mapping=id_mapping                  # For ID conversion from ByteTrack to fixed IDs
         )
 
         # Count passes per player

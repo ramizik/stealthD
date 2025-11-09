@@ -349,7 +349,10 @@ class CompleteSoccerAnalysisPipeline:
         from player_clustering import TeamStabilizer
 
         team_stabilizer = TeamStabilizer(min_frames_threshold=10)
-        all_tracks['player_classids'] = team_stabilizer.stabilize_teams(all_tracks['player_classids'])
+        all_tracks['player_classids'] = team_stabilizer.stabilize_teams(
+            all_tracks['player_classids'],
+            player_tracks=all_tracks.get('player')
+        )
 
         team_summary = team_stabilizer.get_team_summary()
         print(f"  Team stabilization complete:")
@@ -359,6 +362,15 @@ class CompleteSoccerAnalysisPipeline:
         # Step 5.5: Calculate analytics metrics (BEFORE camera compensation)
         # Use original pixel positions with adaptive homography mapper
         print("\n[Step 5.5/8] Calculating player speeds, possession, and passes...")
+
+        # Force reload of analytics modules to get latest pass detection changes
+        import importlib
+        import analytics
+        import analytics.enhanced_pass_detector
+        import analytics.improved_player_ball_assigner
+        importlib.reload(analytics)
+        importlib.reload(analytics.enhanced_pass_detector)
+        importlib.reload(analytics.improved_player_ball_assigner)
         from analytics import MetricsCalculator
 
         video_info = sv.VideoInfo.from_video_path(video_path)
@@ -370,7 +382,8 @@ class CompleteSoccerAnalysisPipeline:
             all_tracks,
             adaptive_mapper,
             video_info,
-            camera_movement  # Pass camera movement for transformation
+            camera_movement,  # Pass camera movement for transformation
+            id_mapper.bytetrack_to_fixed  # Pass ID mapping for pass detection
         )
 
         # Step 5.55: Print adaptive homography statistics

@@ -507,7 +507,14 @@ class TrackingPipeline:
 
             # Assign teams to field players using color clustering
             if len(field_players) > 0:
-                field_player_teams = self.clustering_manager.get_cluster_labels(frame, field_players)
+                cluster_labels = self.clustering_manager.get_cluster_labels(frame, field_players)
+
+                # Remap cluster labels to team IDs based on spatial position
+                # K-means assigns labels 0/1 arbitrarily, so we need to determine which cluster
+                # corresponds to which team based on player positions
+                field_player_teams = self._remap_cluster_labels_to_teams(
+                    field_players, cluster_labels, goalkeepers, frame_width=self.frame_width
+                )
             else:
                 field_player_teams = np.array([])
 
@@ -540,6 +547,102 @@ class TrackingPipeline:
         assignment_time = time.time() - assignment_time
 
         return player_detections, assignment_time
+
+    def _remap_cluster_labels_to_teams(self, field_players, cluster_labels, goalkeepers, frame_width=1920):
+        """
+        Remap K-means cluster labels (0/1) to team IDs (0/1) based on spatial position.
+
+        K-means assigns cluster labels arbitrarily, so we need to determine which cluster
+        corresponds to which team. We use goalkeeper positions (if available) or field player
+        positions to determine the mapping.
+
+        Strategy:
+        - Team 0 = left side of frame (x < frame_width/2)
+        - Team 1 = right side of frame (x > frame_width/2)
+        - If goalkeepers are present, use their positions to anchor the mapping
+        - Otherwise, use field player positions to determine which cluster is on which side
+
+        Args:
+            field_players: Field player detections
+            cluster_labels: Cluster labels from K-means (0 or 1)
+            goalkeepers: Goalkeeper detections (optional)
+            frame_width: Frame width in pixels
+
+        Returns:
+            Remapped team IDs (0 or 1) for field players
+        """
+        if len(cluster_labels) == 0:
+            return np.array([])
+
+        # If we only have one cluster, return as-is (all same team)
+        unique_clusters = np.unique(cluster_labels)
+        if len(unique_clusters) < 2:
+            return cluster_labels
+
+        frame_center_x = frame_width / 2.0
+        field_positions = field_players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+        field_x_positions = field_positions[:, 0]
+
+        # Strategy 1: Use goalkeeper positions to determine team mapping (most reliable)
+        if len(goalkeepers) > 0:
+            gk_positions = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            gk_x_positions = gk_positions[:, 0]
+
+            # Determine which side each goalkeeper is on
+            # Left side goalkeepers → Team 0, Right side → Team 1
+            gk_teams = (gk_x_positions >= frame_center_x).astype(int)  # 0 for left, 1 for right
+
+            # Find field players closest to each goalkeeper to determine cluster mapping
+            # For each goalkeeper, find the nearest field players and see which cluster they belong to
+            cluster_mapping = {}  # {cluster_label: team_id}
+
+            for i, gk_x in enumerate(gk_x_positions):
+                gk_team = gk_teams[i]
+
+                # Find field players near this goalkeeper (within 30% of frame width)
+                proximity_threshold = frame_width * 0.3
+                distances = np.abs(field_x_positions - gk_x)
+                nearby_mask = distances < proximity_threshold
+
+                if nearby_mask.sum() > 0:
+                    # Get cluster labels of nearby players
+                    nearby_clusters = cluster_labels[nearby_mask]
+                    if len(nearby_clusters) > 0:
+                        # Most common cluster near this goalkeeper should be on the same team
+                        from collections import Counter
+                        cluster_counts = Counter(nearby_clusters)
+                        dominant_cluster = cluster_counts.most_common(1)[0][0]
+                        cluster_mapping[dominant_cluster] = gk_team
+
+            # If we have mappings for both clusters, use them
+            if len(cluster_mapping) == 2:
+                # Create remapping: cluster_label -> team_id
+                remapped = np.array([cluster_mapping.get(label, label) for label in cluster_labels])
+                return remapped
+
+        # Strategy 2: Use field player positions to determine cluster mapping (fallback)
+        # Calculate mean x-position for each cluster
+        cluster_0_mask = (cluster_labels == 0)
+        cluster_1_mask = (cluster_labels == 1)
+
+        if cluster_0_mask.sum() > 0 and cluster_1_mask.sum() > 0:
+            cluster_0_mean_x = field_x_positions[cluster_0_mask].mean()
+            cluster_1_mean_x = field_x_positions[cluster_1_mask].mean()
+
+            # Determine which cluster is on which side
+            # Left side cluster → Team 0, Right side cluster → Team 1
+            if cluster_0_mean_x < cluster_1_mean_x:
+                # Cluster 0 is on left → Team 0, Cluster 1 is on right → Team 1
+                # No remapping needed
+                return cluster_labels
+            else:
+                # Cluster 0 is on right → Team 1, Cluster 1 is on left → Team 0
+                # Swap the labels: 0→1, 1→0
+                remapped = np.where(cluster_labels == 0, 1, 0)
+                return remapped
+        else:
+            # Only one cluster present, return as-is
+            return cluster_labels
 
     def _identify_goalkeepers(self, player_detections, frame_width_px=1920, frame_idx=None):
         """
