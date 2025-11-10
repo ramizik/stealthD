@@ -46,7 +46,7 @@ model_path = PROJECT_DIR / model_path
 # VIDEO CONFIGURATION
 # =============================================================================
 
-# Input test video path
+# Input test video pathcl
 # UPDATE THIS: Point to your actual test video file
 test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
 

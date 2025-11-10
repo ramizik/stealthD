@@ -261,35 +261,70 @@ class CameraMovementEstimator:
             x_movement, y_movement = camera_movement[frame_idx]
 
             # Skip frames with no detections
-            if -1 in frame_tracks:
+            if not isinstance(frame_tracks, dict) or -1 in frame_tracks:
                 continue
 
             # Compensate each player's bbox
-            for player_id, bbox in frame_tracks.items():
-                if bbox is not None and all(b is not None for b in bbox):
+            for player_id, track_data in frame_tracks.items():
+                if player_id == -1:
+                    continue
+
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                     x1, y1, x2, y2 = bbox
-                    tracks['player'][frame_idx][player_id] = [
+                    compensated_bbox = [
                         x1 - x_movement,
                         y1 - y_movement,
                         x2 - x_movement,
                         y2 - y_movement
                     ]
 
+                    # Update in appropriate format
+                    if isinstance(track_data, dict):
+                        track_data['bbox'] = compensated_bbox
+                    else:
+                        tracks['player'][frame_idx][player_id] = compensated_bbox
+
         # Compensate ball tracks
-        for frame_idx, bbox in tracks['ball'].items():
+        for frame_idx, track_data in tracks['ball'].items():
             if frame_idx >= len(camera_movement):
                 continue
 
             x_movement, y_movement = camera_movement[frame_idx]
 
-            if bbox is not None and all(b is not None for b in bbox):
+            # Handle both formats: list (bbox) or dict (enhanced format)
+            if isinstance(track_data, dict):
+                # Enhanced format: {0: {'bbox': [x1, y1, x2, y2], ...}}
+                if 0 in track_data and isinstance(track_data[0], dict):
+                    bbox = track_data[0].get('bbox', None)
+                else:
+                    continue
+            elif isinstance(track_data, list) and len(track_data) >= 4:
+                bbox = track_data
+            else:
+                continue
+
+            if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                 x1, y1, x2, y2 = bbox
-                tracks['ball'][frame_idx] = [
+                compensated_bbox = [
                     x1 - x_movement,
                     y1 - y_movement,
                     x2 - x_movement,
                     y2 - y_movement
                 ]
+
+                # Update in appropriate format
+                if isinstance(track_data, dict):
+                    track_data[0]['bbox'] = compensated_bbox
+                else:
+                    tracks['ball'][frame_idx] = compensated_bbox
 
         # Compensate referee tracks
         for frame_idx, frame_tracks in tracks['referee'].items():
@@ -299,19 +334,36 @@ class CameraMovementEstimator:
             x_movement, y_movement = camera_movement[frame_idx]
 
             # Skip frames with no detections
-            if -1 in frame_tracks:
+            if not isinstance(frame_tracks, dict) or -1 in frame_tracks:
                 continue
 
             # Compensate each referee's bbox
-            for ref_id, bbox in frame_tracks.items():
-                if bbox is not None and all(b is not None for b in bbox):
+            for ref_id, track_data in frame_tracks.items():
+                if ref_id == -1:
+                    continue
+
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                     x1, y1, x2, y2 = bbox
-                    tracks['referee'][frame_idx][ref_id] = [
+                    compensated_bbox = [
                         x1 - x_movement,
                         y1 - y_movement,
                         x2 - x_movement,
                         y2 - y_movement
                     ]
+
+                    # Update in appropriate format
+                    if isinstance(track_data, dict):
+                        track_data['bbox'] = compensated_bbox
+                    else:
+                        tracks['referee'][frame_idx][ref_id] = compensated_bbox
 
         print(f"  Camera movement compensation complete")
 
@@ -338,35 +390,70 @@ class CameraMovementEstimator:
             x_movement, y_movement = camera_movement[frame_idx]
 
             # Skip frames with no detections
-            if -1 in frame_tracks:
+            if not isinstance(frame_tracks, dict) or -1 in frame_tracks:
                 continue
 
             # Restore each player's bbox (add camera movement back)
-            for player_id, bbox in frame_tracks.items():
-                if bbox is not None and all(b is not None for b in bbox):
+            for player_id, track_data in frame_tracks.items():
+                if player_id == -1:
+                    continue
+
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                     x1, y1, x2, y2 = bbox
-                    tracks['player'][frame_idx][player_id] = [
+                    restored_bbox = [
                         x1 + x_movement,
                         y1 + y_movement,
                         x2 + x_movement,
                         y2 + y_movement
                     ]
 
+                    # Update in appropriate format
+                    if isinstance(track_data, dict):
+                        track_data['bbox'] = restored_bbox
+                    else:
+                        tracks['player'][frame_idx][player_id] = restored_bbox
+
         # Restore ball tracks
-        for frame_idx, bbox in tracks['ball'].items():
+        for frame_idx, track_data in tracks['ball'].items():
             if frame_idx >= len(camera_movement):
                 continue
 
             x_movement, y_movement = camera_movement[frame_idx]
 
-            if bbox is not None and all(b is not None for b in bbox):
+            # Handle both formats: list (bbox) or dict (enhanced format)
+            if isinstance(track_data, dict):
+                # Enhanced format: {0: {'bbox': [x1, y1, x2, y2], ...}}
+                if 0 in track_data and isinstance(track_data[0], dict):
+                    bbox = track_data[0].get('bbox', None)
+                else:
+                    continue
+            elif isinstance(track_data, list) and len(track_data) >= 4:
+                bbox = track_data
+            else:
+                continue
+
+            if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                 x1, y1, x2, y2 = bbox
-                tracks['ball'][frame_idx] = [
+                restored_bbox = [
                     x1 + x_movement,
                     y1 + y_movement,
                     x2 + x_movement,
                     y2 + y_movement
                 ]
+
+                # Update in appropriate format
+                if isinstance(track_data, dict):
+                    track_data[0]['bbox'] = restored_bbox
+                else:
+                    tracks['ball'][frame_idx] = restored_bbox
 
         # Restore referee tracks
         for frame_idx, frame_tracks in tracks['referee'].items():
@@ -376,18 +463,35 @@ class CameraMovementEstimator:
             x_movement, y_movement = camera_movement[frame_idx]
 
             # Skip frames with no detections
-            if -1 in frame_tracks:
+            if not isinstance(frame_tracks, dict) or -1 in frame_tracks:
                 continue
 
             # Restore each referee's bbox
-            for ref_id, bbox in frame_tracks.items():
-                if bbox is not None and all(b is not None for b in bbox):
+            for ref_id, track_data in frame_tracks.items():
+                if ref_id == -1:
+                    continue
+
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and len(bbox) >= 4 and all(b is not None for b in bbox):
                     x1, y1, x2, y2 = bbox
-                    tracks['referee'][frame_idx][ref_id] = [
+                    restored_bbox = [
                         x1 + x_movement,
                         y1 + y_movement,
                         x2 + x_movement,
                         y2 + y_movement
                     ]
+
+                    # Update in appropriate format
+                    if isinstance(track_data, dict):
+                        track_data['bbox'] = restored_bbox
+                    else:
+                        tracks['referee'][frame_idx][ref_id] = restored_bbox
 
         return tracks

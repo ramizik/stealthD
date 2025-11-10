@@ -507,14 +507,7 @@ class TrackingPipeline:
 
             # Assign teams to field players using color clustering
             if len(field_players) > 0:
-                cluster_labels = self.clustering_manager.get_cluster_labels(frame, field_players)
-
-                # Remap cluster labels to team IDs based on spatial position
-                # K-means assigns labels 0/1 arbitrarily, so we need to determine which cluster
-                # corresponds to which team based on player positions
-                field_player_teams = self._remap_cluster_labels_to_teams(
-                    field_players, cluster_labels, goalkeepers, frame_width=self.frame_width
-                )
+                field_player_teams = self.clustering_manager.get_cluster_labels(frame, field_players)
             else:
                 field_player_teams = np.array([])
 
@@ -547,102 +540,6 @@ class TrackingPipeline:
         assignment_time = time.time() - assignment_time
 
         return player_detections, assignment_time
-
-    def _remap_cluster_labels_to_teams(self, field_players, cluster_labels, goalkeepers, frame_width=1920):
-        """
-        Remap K-means cluster labels (0/1) to team IDs (0/1) based on spatial position.
-
-        K-means assigns cluster labels arbitrarily, so we need to determine which cluster
-        corresponds to which team. We use goalkeeper positions (if available) or field player
-        positions to determine the mapping.
-
-        Strategy:
-        - Team 0 = left side of frame (x < frame_width/2)
-        - Team 1 = right side of frame (x > frame_width/2)
-        - If goalkeepers are present, use their positions to anchor the mapping
-        - Otherwise, use field player positions to determine which cluster is on which side
-
-        Args:
-            field_players: Field player detections
-            cluster_labels: Cluster labels from K-means (0 or 1)
-            goalkeepers: Goalkeeper detections (optional)
-            frame_width: Frame width in pixels
-
-        Returns:
-            Remapped team IDs (0 or 1) for field players
-        """
-        if len(cluster_labels) == 0:
-            return np.array([])
-
-        # If we only have one cluster, return as-is (all same team)
-        unique_clusters = np.unique(cluster_labels)
-        if len(unique_clusters) < 2:
-            return cluster_labels
-
-        frame_center_x = frame_width / 2.0
-        field_positions = field_players.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-        field_x_positions = field_positions[:, 0]
-
-        # Strategy 1: Use goalkeeper positions to determine team mapping (most reliable)
-        if len(goalkeepers) > 0:
-            gk_positions = goalkeepers.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-            gk_x_positions = gk_positions[:, 0]
-
-            # Determine which side each goalkeeper is on
-            # Left side goalkeepers → Team 0, Right side → Team 1
-            gk_teams = (gk_x_positions >= frame_center_x).astype(int)  # 0 for left, 1 for right
-
-            # Find field players closest to each goalkeeper to determine cluster mapping
-            # For each goalkeeper, find the nearest field players and see which cluster they belong to
-            cluster_mapping = {}  # {cluster_label: team_id}
-
-            for i, gk_x in enumerate(gk_x_positions):
-                gk_team = gk_teams[i]
-
-                # Find field players near this goalkeeper (within 30% of frame width)
-                proximity_threshold = frame_width * 0.3
-                distances = np.abs(field_x_positions - gk_x)
-                nearby_mask = distances < proximity_threshold
-
-                if nearby_mask.sum() > 0:
-                    # Get cluster labels of nearby players
-                    nearby_clusters = cluster_labels[nearby_mask]
-                    if len(nearby_clusters) > 0:
-                        # Most common cluster near this goalkeeper should be on the same team
-                        from collections import Counter
-                        cluster_counts = Counter(nearby_clusters)
-                        dominant_cluster = cluster_counts.most_common(1)[0][0]
-                        cluster_mapping[dominant_cluster] = gk_team
-
-            # If we have mappings for both clusters, use them
-            if len(cluster_mapping) == 2:
-                # Create remapping: cluster_label -> team_id
-                remapped = np.array([cluster_mapping.get(label, label) for label in cluster_labels])
-                return remapped
-
-        # Strategy 2: Use field player positions to determine cluster mapping (fallback)
-        # Calculate mean x-position for each cluster
-        cluster_0_mask = (cluster_labels == 0)
-        cluster_1_mask = (cluster_labels == 1)
-
-        if cluster_0_mask.sum() > 0 and cluster_1_mask.sum() > 0:
-            cluster_0_mean_x = field_x_positions[cluster_0_mask].mean()
-            cluster_1_mean_x = field_x_positions[cluster_1_mask].mean()
-
-            # Determine which cluster is on which side
-            # Left side cluster → Team 0, Right side cluster → Team 1
-            if cluster_0_mean_x < cluster_1_mean_x:
-                # Cluster 0 is on left → Team 0, Cluster 1 is on right → Team 1
-                # No remapping needed
-                return cluster_labels
-            else:
-                # Cluster 0 is on right → Team 1, Cluster 1 is on left → Team 0
-                # Swap the labels: 0→1, 1→0
-                remapped = np.where(cluster_labels == 0, 1, 0)
-                return remapped
-        else:
-            # Only one cluster present, return as-is
-            return cluster_labels
 
     def _identify_goalkeepers(self, player_detections, frame_width_px=1920, frame_idx=None):
         """
@@ -1036,7 +933,7 @@ class TrackingPipeline:
 
     def annotate_single_frame(self, frame, frame_idx, tracks):
         """
-        Annotate a single frame with tracking results.
+        Annotate a single frame with tracking results and speed/distance visualization.
 
         Args:
             frame: Input video frame
@@ -1048,19 +945,32 @@ class TrackingPipeline:
         """
         # Get tracks for this frame
         player_tracks = tracks['player'].get(frame_idx, {})
-        ball_tracks = tracks['ball'].get(frame_idx, [None]*4)
+
+        # Handle ball tracks - can be list or dict format
+        ball_tracks_raw = tracks['ball'].get(frame_idx, [None]*4)
+        if isinstance(ball_tracks_raw, dict):
+            # Enhanced format: {0: {'bbox': [x1, y1, x2, y2], ...}}
+            if 0 in ball_tracks_raw and isinstance(ball_tracks_raw[0], dict):
+                ball_tracks = ball_tracks_raw[0].get('bbox', [None]*4)
+            else:
+                ball_tracks = [None]*4
+        elif isinstance(ball_tracks_raw, list):
+            ball_tracks = ball_tracks_raw
+        else:
+            ball_tracks = [None]*4
+
         referee_tracks = tracks['referee'].get(frame_idx, {})
         player_classids = tracks.get('player_classids', {}).get(frame_idx, None)
         player_is_goalkeeper = tracks.get('player_is_goalkeeper', {}).get(frame_idx, None)
 
         # Clean up invalid tracks
-        if -1 in player_tracks:
+        if isinstance(player_tracks, dict) and -1 in player_tracks:
             player_tracks = None
             player_classids = None
             player_is_goalkeeper = None
-        if -1 in referee_tracks:
+        if isinstance(referee_tracks, dict) and -1 in referee_tracks:
             referee_tracks = None
-        if (not all(ball_tracks)) or np.isnan(ball_tracks).all():
+        if ball_tracks is None or (isinstance(ball_tracks, list) and ((not all(ball_tracks)) or np.isnan(ball_tracks).all())):
             ball_tracks = None
 
         # Convert to detections with stored class IDs and goalkeeper status
@@ -1068,10 +978,23 @@ class TrackingPipeline:
             player_tracks, ball_tracks, referee_tracks, player_classids, player_is_goalkeeper
         )
 
-        # Annotate frame
+        # Annotate frame with tracking boxes and team colors
         annotated_frame = self.annotator_manager.annotate_all(
             frame, player_detections, ball_detections, referee_detections
         )
+
+        # Add speed and distance visualization if available
+        try:
+            from analytics import SpeedAndDistance_Estimator
+            # Create a temporary estimator instance to use the drawing method
+            # (We don't need to calculate, just draw on the already annotated frame)
+            speed_distance_estimator = SpeedAndDistance_Estimator()
+            annotated_frame = speed_distance_estimator.draw_speed_and_distance_on_frame(
+                annotated_frame, frame_idx, tracks
+            )
+        except (ImportError, AttributeError, KeyError) as e:
+            # If speed/distance visualization fails, continue without it
+            pass
 
         return annotated_frame
 

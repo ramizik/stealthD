@@ -17,7 +17,7 @@ from typing import Dict, Tuple
 import numpy as np
 import supervision as sv
 
-from .robust_pass_detector import RobustPassDetector as EnhancedPassDetector
+from .robust_pass_detector import RobustPassDetector
 from .improved_player_ball_assigner import ImprovedPlayerBallAssigner
 from .possession_tracker import PossessionTracker
 from .speed_calculator import SpeedCalculator
@@ -40,17 +40,18 @@ class MetricsCalculator:
             min_possession_frames=1
         )
 
-        # NEW: Enhanced components
-        self.pass_detector = EnhancedPassDetector(
-            min_pass_distance=0.3,       # More permissive
-            max_pass_distance=70.0,      # Allow longer passes
-            max_gap_frames=150,          # 5 seconds
-            velocity_threshold=0.5,      # Lower threshold
-            min_ball_movement=2.0        # Ball must move 2m
+        # Use ImprovedPlayerBallAssigner and RobustPassDetector (from user's working scripts)
+        self.ball_assigner = ImprovedPlayerBallAssigner(
+            max_ball_distance=10.0  # Distance in meters (default from user's code)
         )
 
-        self.ball_assigner = ImprovedPlayerBallAssigner(
-            max_ball_distance=10.0       # Increased from 8.0m
+        self.pass_detector = RobustPassDetector(
+            min_pass_distance=0.3,
+            max_pass_distance=70.0,
+            max_gap_frames=150,
+            velocity_threshold=0.5,
+            min_ball_movement=2.0,
+            enable_fallback_mode=True
         )
 
     def _calculate_ball_field_coordinates(self, ball_tracks: Dict, adaptive_mapper,
@@ -59,7 +60,7 @@ class MetricsCalculator:
         Calculate field coordinates for ball positions using adaptive per-frame homography.
 
         Args:
-            ball_tracks: Dictionary {frame_idx: [x1, y1, x2, y2]}
+            ball_tracks: Dictionary {frame_idx: [x1, y1, x2, y2]} or {frame_idx: {0: {'bbox': [...], 'position_transformed': [...]}}}
             adaptive_mapper: AdaptiveHomographyMapper object
             video_dimensions: (width, height) of video in pixels
             camera_movement: List of [x_movement, y_movement] per frame
@@ -68,29 +69,93 @@ class MetricsCalculator:
             Dictionary {frame_idx: [x, y]} with ball field coordinates
         """
         ball_field_coords = {}
+        used_position_transformed = 0
+        used_adaptive_mapper = 0
+        failed_conversions = 0
 
-        for frame_idx, bbox in ball_tracks.items():
-            if bbox is None or any(b is None for b in bbox):
+        for frame_idx, track_data in ball_tracks.items():
+            field_coord = None
+
+            # Handle enhanced format: {0: {'bbox': [...], 'position_transformed': [...]}}
+            if isinstance(track_data, dict) and 0 in track_data:
+                track_info = track_data[0]
+                if isinstance(track_info, dict):
+                    # First, try to use position_transformed if available (from ViewTransformer)
+                    position_transformed = track_info.get('position_transformed', None)
+                    if position_transformed is not None:
+                        # position_transformed is already in field coordinates (meters)
+                        field_coord = np.array(position_transformed)
+                        used_position_transformed += 1
+                    else:
+                        # Fall back to position_adjusted (pixel coordinates) with adaptive_mapper
+                        position_adjusted = track_info.get('position_adjusted', None)
+                        if position_adjusted is not None:
+                            ball_center = np.array(position_adjusted)
+                        else:
+                            # Last resort: use bbox center
+                            bbox = track_info.get('bbox', None)
+                            if bbox is None or any(b is None for b in bbox) or len(bbox) < 4:
+                                failed_conversions += 1
+                                continue
+                            x_center = (bbox[0] + bbox[2]) / 2
+                            y_center = (bbox[1] + bbox[3]) / 2
+                            ball_center = np.array([x_center, y_center])
+
+                        # Get camera motion for this frame if available
+                        camera_motion = None
+                        if camera_movement and frame_idx < len(camera_movement):
+                            camera_motion = tuple(camera_movement[frame_idx])
+
+                        # Convert to field coordinates using adaptive transformation
+                        field_coord, method, confidence = adaptive_mapper.transform_point(
+                            frame_idx, ball_center, camera_motion
+                        )
+                        if field_coord is not None:
+                            used_adaptive_mapper += 1
+                        else:
+                            failed_conversions += 1
+                            continue
+            # Handle simple format: list (bbox)
+            elif isinstance(track_data, list) and len(track_data) >= 4:
+                if any(b is None for b in track_data):
+                    failed_conversions += 1
+                    continue
+
+                # Get center of ball bounding box
+                x_center = (track_data[0] + track_data[2]) / 2
+                y_center = (track_data[1] + track_data[3]) / 2
+                ball_center = np.array([x_center, y_center])
+
+                # Get camera motion for this frame if available
+                camera_motion = None
+                if camera_movement and frame_idx < len(camera_movement):
+                    camera_motion = tuple(camera_movement[frame_idx])
+
+                # Convert to field coordinates using adaptive transformation
+                field_coord, method, confidence = adaptive_mapper.transform_point(
+                    frame_idx, ball_center, camera_motion
+                )
+                if field_coord is not None:
+                    used_adaptive_mapper += 1
+                else:
+                    failed_conversions += 1
+                    continue
+            else:
+                failed_conversions += 1
                 continue
 
-            # Get center of ball bounding box
-            x_center = (bbox[0] + bbox[2]) / 2
-            y_center = (bbox[1] + bbox[3]) / 2
-            ball_center = np.array([x_center, y_center])
-
-            # Get camera motion for this frame if available
-            camera_motion = None
-            if camera_movement and frame_idx < len(camera_movement):
-                camera_motion = tuple(camera_movement[frame_idx])
-
-            # Convert to field coordinates using adaptive transformation
-            field_coord, method, confidence = adaptive_mapper.transform_point(
-                frame_idx, ball_center, camera_motion
-            )
-
-            # Skip if conversion failed (should be rare with adaptive fallbacks)
+            # Store the field coordinate
             if field_coord is not None:
                 ball_field_coords[int(frame_idx)] = [float(field_coord[0]), float(field_coord[1])]
+
+        # Debug output
+        if len(ball_field_coords) == 0:
+            print(f"      [ERROR] No ball field coordinates calculated!")
+            print(f"        Used position_transformed: {used_position_transformed}")
+            print(f"        Used adaptive_mapper: {used_adaptive_mapper}")
+            print(f"        Failed conversions: {failed_conversions}")
+        else:
+            print(f"      [DEBUG] Ball coord sources: {used_position_transformed} from ViewTransformer, {used_adaptive_mapper} from adaptive_mapper")
 
         return ball_field_coords
 
@@ -135,14 +200,28 @@ class MetricsCalculator:
         # Transform player_tracks from {frame: {player_id: bbox}} to {player_id: {frame: center}}
         player_positions_by_id = {}
         for frame_idx, frame_players in player_tracks.items():
-            for player_id, bbox in frame_players.items():
+            if not isinstance(frame_players, dict):
+                continue
+            for player_id, track_data in frame_players.items():
+                if player_id == -1:
+                    continue
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is None or len(bbox) < 4 or any(b is None for b in bbox):
+                    continue
+
                 if player_id not in player_positions_by_id:
                     player_positions_by_id[player_id] = {}
                 # Calculate center of bounding box
-                if len(bbox) >= 4:
-                    center_x = (bbox[0] + bbox[2]) / 2
-                    center_y = (bbox[1] + bbox[3]) / 2
-                    player_positions_by_id[player_id][int(frame_idx)] = [center_x, center_y]
+                center_x = (bbox[0] + bbox[2]) / 2
+                center_y = (bbox[1] + bbox[3]) / 2
+                player_positions_by_id[player_id][int(frame_idx)] = [center_x, center_y]
 
         print(f"  Transformed {len(player_tracks)} frames of tracking data for {len(player_positions_by_id)} players")
 
@@ -155,9 +234,31 @@ class MetricsCalculator:
 
         # Step 2: Calculate ball field coordinates
         print("  - Calculating ball field coordinates...")
+        print(f"    Ball tracks: {len(ball_tracks)} frames")
         ball_field_coords = self._calculate_ball_field_coordinates(
             ball_tracks, adaptive_mapper, video_dimensions, camera_movement
         )
+        print(f"    Ball field coords calculated: {len(ball_field_coords)} frames")
+
+        # Step 2.5: Build field_coords_players structure for ImprovedPlayerBallAssigner and RobustPassDetector
+        # Structure: {player_id: {'field_coordinates': {frame_idx: [x, y]}}}
+        print("  - Building player field coordinates structure...")
+        field_coords_players = {}
+        total_player_coords = 0
+        for player_id, positions in player_positions_by_id.items():
+            field_coords_players[player_id] = {'field_coordinates': {}}
+            for frame_idx, pixel_pos in positions.items():
+                # Transform pixel position to field coordinates
+                field_coord, method, confidence = adaptive_mapper.transform_point(
+                    frame_idx, np.array(pixel_pos),
+                    tuple(camera_movement[frame_idx]) if camera_movement and frame_idx < len(camera_movement) else None
+                )
+                if field_coord is not None:
+                    field_coords_players[player_id]['field_coordinates'][frame_idx] = [float(field_coord[0]), float(field_coord[1])]
+                    total_player_coords += 1
+
+        print(f"    Built field coordinates for {len(field_coords_players)} players, {total_player_coords} total coordinate pairs")
+        print(f"    Ball field coordinates: {len(ball_field_coords)} frames")
 
         # Clear memory after ball coordinate calculation
         gc.collect()
@@ -177,10 +278,24 @@ class MetricsCalculator:
         gc.collect()
 
         # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
-        # Step 4: Frame-by-frame ball assignment for touch detection (before pass detection)
         print("  - Assigning ball to players frame-by-frame...")
+
+        # Debug: Check data availability
+        common_frames = set(player_tracks.keys()) & set(ball_tracks.keys())
+        frames_with_player_coords = set()
+        frames_with_ball_coords = set(ball_field_coords.keys())
+
+        for player_id, player_data in field_coords_players.items():
+            if 'field_coordinates' in player_data:
+                frames_with_player_coords.update(player_data['field_coordinates'].keys())
+
+        print(f"    Common frames (player_tracks & ball_tracks): {len(common_frames)}")
+        print(f"    Frames with player field coords: {len(frames_with_player_coords)}")
+        print(f"    Frames with ball field coords: {len(frames_with_ball_coords)}")
+        print(f"    Overlap (player coords & ball coords): {len(frames_with_player_coords & frames_with_ball_coords)}")
+
         ball_assignments_with_distance = self.ball_assigner.assign_ball_for_all_frames(
-            player_tracks, ball_tracks, player_speeds, ball_field_coords
+            player_tracks, ball_tracks, field_coords_players, ball_field_coords
         )
 
         # Analyze assignment quality
@@ -198,11 +313,11 @@ class MetricsCalculator:
         # Clear memory after ball assignment
         gc.collect()
 
-        # Step 5: Detect passes with HYBRID VALIDATION (possession + touches + velocity)
-        print("  - Detecting passes with hybrid validation...")
+        # Step 5: Detect passes with RobustPassDetector
+        print("  - Detecting passes with robust validation...")
         passes = self.pass_detector.detect_passes(
-            possession_events, player_speeds, team_assignments, self.fps,
-            ball_field_coords=ball_field_coords,  # For velocity validation
+            possession_events, field_coords_players, team_assignments, self.fps,
+            ball_field_coords=ball_field_coords,  # For trajectory validation
             ball_assignments=ball_assignments,     # For touch validation
             id_mapping=id_mapping                  # For ID conversion from ByteTrack to fixed IDs
         )

@@ -274,49 +274,71 @@ class AnnotatorManager:
             Tuple of converted detection objects
         """
         # Get the player detections
-        if player_tracks is not None:
-            if player_classids is not None:
-                # Use stored class IDs
-                class_ids = [player_classids[tracker_id] for tracker_id in player_tracks.keys()]
+        tracker_ids = []  # Initialize for use in goalkeeper metadata restoration
+        if player_tracks is not None and isinstance(player_tracks, dict):
+            # Extract bboxes from track data (handle both list and dict formats)
+            bboxes = []
+            for tracker_id, track_data in player_tracks.items():
+                if tracker_id == -1:
+                    continue
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and not any(b is None for b in bbox):
+                    bboxes.append(bbox)
+                    tracker_ids.append(tracker_id)
+
+            if len(bboxes) > 0:
+                if player_classids is not None:
+                    # Use stored class IDs
+                    class_ids = [player_classids.get(tid, 0) for tid in tracker_ids]
+                else:
+                    # Fall back to default class ID (0)
+                    class_ids = [0] * len(tracker_ids)
+
+                player_detections = sv.Detections(
+                    xyxy=np.array(bboxes),
+                    class_id=np.array(class_ids),
+                    tracker_id=np.array(tracker_ids)
+                )
             else:
-                # Fall back to default class ID (0)
-                class_ids = [0] * len(player_tracks)
-
-            player_detections = sv.Detections(
-                xyxy=np.array(list(player_tracks.values())),
-                class_id=np.array(class_ids),
-                tracker_id=np.array(list(player_tracks.keys()))
-            )
-
-            # Restore goalkeeper metadata if available
-            if player_is_goalkeeper is not None:
-                # Use .get() with default False for tracker IDs not in goalkeeper dict
-                goalkeeper_mask = np.array([player_is_goalkeeper.get(tracker_id, False) for tracker_id in player_tracks.keys()])
-                player_detections.data = {'is_goalkeeper': goalkeeper_mask}
-
-                # DEBUG: Log goalkeeper data restoration
-                if not hasattr(self, '_gk_restore_debug_counter'):
-                    self._gk_restore_debug_counter = 0
-
-                if self._gk_restore_debug_counter % 100 == 0:
-                    gk_count = np.sum(goalkeeper_mask)
-                    if gk_count > 0:
-                        gk_ids = [list(player_tracks.keys())[i] for i in range(len(goalkeeper_mask)) if goalkeeper_mask[i]]
-                        self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: Restored {gk_count} goalkeeper(s): {gk_ids}")
-                        self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
-                    else:
-                        self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: No goalkeepers in this frame")
-                        self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
-                        self._log_gk(f"[RESTORE DEBUG]   tracker IDs in frame: {list(player_tracks.keys())}")
-
-                self._gk_restore_debug_counter += 1
-            else:
-                # DEBUG: Log when no goalkeeper data is provided
-                if not hasattr(self, '_no_gk_data_logged'):
-                    print(f"[RESTORE DEBUG] WARNING: No goalkeeper metadata provided for frame")
-                    self._no_gk_data_logged = True
+                player_detections = None
         else:
             player_detections = None
+
+        # Restore goalkeeper metadata if available
+        if player_detections is not None and player_is_goalkeeper is not None and len(tracker_ids) > 0:
+            # Use .get() with default False for tracker IDs not in goalkeeper dict
+            goalkeeper_mask = np.array([player_is_goalkeeper.get(tracker_id, False) for tracker_id in tracker_ids])
+            player_detections.data = {'is_goalkeeper': goalkeeper_mask}
+
+            # DEBUG: Log goalkeeper data restoration
+            if not hasattr(self, '_gk_restore_debug_counter'):
+                self._gk_restore_debug_counter = 0
+
+            if self._gk_restore_debug_counter % 100 == 0:
+                gk_count = np.sum(goalkeeper_mask) if player_detections is not None else 0
+                if gk_count > 0:
+                    gk_ids = [tracker_ids[i] for i in range(len(goalkeeper_mask)) if goalkeeper_mask[i]]
+                    self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: Restored {gk_count} goalkeeper(s): {gk_ids}")
+                    self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
+                else:
+                    self._log_gk(f"[RESTORE DEBUG] Frame ~{self._gk_restore_debug_counter}: No goalkeepers in this frame")
+                    self._log_gk(f"[RESTORE DEBUG]   player_is_goalkeeper dict: {player_is_goalkeeper}")
+                    if player_tracks is not None:
+                        self._log_gk(f"[RESTORE DEBUG]   tracker IDs in frame: {list(player_tracks.keys())}")
+
+            self._gk_restore_debug_counter += 1
+        else:
+            # DEBUG: Log when no goalkeeper data is provided
+            if player_detections is not None and not hasattr(self, '_no_gk_data_logged'):
+                print(f"[RESTORE DEBUG] WARNING: No goalkeeper metadata provided for frame")
+                self._no_gk_data_logged = True
 
         # Get the ball detections
         if ball_tracks is not None:
@@ -328,12 +350,33 @@ class AnnotatorManager:
             ball_detections = None
 
         # Get the referee detections
-        if referee_tracks is not None:
-            referee_detections = sv.Detections(
-                xyxy=np.array(list(referee_tracks.values())),
-                class_id=np.array([3] * len(referee_tracks)),
-                tracker_id=np.array(list(referee_tracks.keys()))
-            )
+        if referee_tracks is not None and isinstance(referee_tracks, dict):
+            # Extract bboxes from track data (handle both list and dict formats)
+            bboxes = []
+            referee_ids = []
+            for ref_id, track_data in referee_tracks.items():
+                if ref_id == -1:
+                    continue
+                # Handle both formats: list (bbox) or dict (enhanced format)
+                if isinstance(track_data, dict):
+                    bbox = track_data.get('bbox', None)
+                elif isinstance(track_data, list) and len(track_data) >= 4:
+                    bbox = track_data
+                else:
+                    continue
+
+                if bbox is not None and not any(b is None for b in bbox):
+                    bboxes.append(bbox)
+                    referee_ids.append(ref_id)
+
+            if len(bboxes) > 0:
+                referee_detections = sv.Detections(
+                    xyxy=np.array(bboxes),
+                    class_id=np.array([3] * len(referee_ids)),
+                    tracker_id=np.array(referee_ids)
+                )
+            else:
+                referee_detections = None
         else:
             referee_detections = None
 

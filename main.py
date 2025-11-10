@@ -10,6 +10,10 @@ import os
 import pickle
 import time
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 import cv2
 import numpy as np
 import supervision as sv
@@ -349,15 +353,119 @@ class CompleteSoccerAnalysisPipeline:
         from player_clustering import TeamStabilizer
 
         team_stabilizer = TeamStabilizer(min_frames_threshold=10)
-        all_tracks['player_classids'] = team_stabilizer.stabilize_teams(
-            all_tracks['player_classids'],
-            player_tracks=all_tracks.get('player')
-        )
+        all_tracks['player_classids'] = team_stabilizer.stabilize_teams(all_tracks['player_classids'])
 
         team_summary = team_stabilizer.get_team_summary()
         print(f"  Team stabilization complete:")
         print(f"    Team 0: {team_summary.get('team_0_count', 0)} players")
         print(f"    Team 1: {team_summary.get('team_1_count', 0)} players")
+
+        # Step 5.45: Convert tracks to enhanced format and apply ViewTransformer
+        print("\n[Step 5.45/8] Converting tracks to enhanced format and applying ViewTransformer...")
+        from utils import convert_tracks_to_enhanced_format
+        from tactical_analysis.view_transformer import ViewTransformer
+
+        # Convert tracks to enhanced format (adds position_adjusted and bbox in track_info)
+        enhanced_tracks = convert_tracks_to_enhanced_format(all_tracks)
+
+        # Initialize ViewTransformer (using default vertices, can be customized)
+        view_transformer = ViewTransformer()
+
+        # Add transformed positions to tracks
+        view_transformer.add_transformed_position_to_tracks(enhanced_tracks)
+
+        # Merge enhanced tracks back into all_tracks (preserve existing structure)
+        # Only update tracks that have enhanced data
+        for object_type in ['player', 'ball', 'referee']:
+            if object_type not in enhanced_tracks:
+                continue
+
+            if object_type not in all_tracks:
+                all_tracks[object_type] = {}
+
+            for frame_idx, frame_tracks in enhanced_tracks[object_type].items():
+                if not isinstance(frame_idx, int):
+                    continue
+
+                # Handle ball tracks specially (original: {frame_idx: list}, enhanced: {frame_idx: {0: dict}})
+                if object_type == 'ball':
+                    if frame_idx in all_tracks[object_type]:
+                        original_ball = all_tracks[object_type][frame_idx]
+                        if isinstance(frame_tracks, dict) and 0 in frame_tracks:
+                            track_info = frame_tracks[0]
+                            if isinstance(track_info, dict):
+                                # Convert ball to dict format
+                                if isinstance(original_ball, list):
+                                    all_tracks[object_type][frame_idx] = {
+                                        0: {
+                                            'bbox': original_ball,
+                                            'position_adjusted': track_info.get('position_adjusted'),
+                                            'position_transformed': track_info.get('position_transformed')
+                                        }
+                                    }
+                                elif isinstance(original_ball, dict):
+                                    # Already in dict format, update it
+                                    if 0 in original_ball:
+                                        if isinstance(original_ball[0], dict):
+                                            original_ball[0].update({
+                                                'position_adjusted': track_info.get('position_adjusted'),
+                                                'position_transformed': track_info.get('position_transformed')
+                                            })
+                                        else:
+                                            original_ball[0] = {
+                                                'bbox': original_ball[0] if isinstance(original_ball[0], list) else None,
+                                                'position_adjusted': track_info.get('position_adjusted'),
+                                                'position_transformed': track_info.get('position_transformed')
+                                            }
+                    continue
+
+                # Handle player and referee tracks
+                if frame_idx not in all_tracks[object_type]:
+                    continue
+
+                if not isinstance(frame_tracks, dict):
+                    continue
+
+                for track_id, track_info in frame_tracks.items():
+                    if not isinstance(track_info, dict):
+                        continue
+
+                    if track_id not in all_tracks[object_type][frame_idx]:
+                        continue
+
+                    # Update existing track with enhanced info
+                    existing_track = all_tracks[object_type][frame_idx][track_id]
+                    if not isinstance(existing_track, dict):
+                        # Convert to dict format
+                        bbox = existing_track if isinstance(existing_track, list) else None
+                        all_tracks[object_type][frame_idx][track_id] = {
+                            'bbox': bbox,
+                            'position_adjusted': track_info.get('position_adjusted'),
+                            'position_transformed': track_info.get('position_transformed')
+                        }
+                    else:
+                        # Merge with existing dict
+                        existing_track.update({
+                            'position_adjusted': track_info.get('position_adjusted'),
+                            'position_transformed': track_info.get('position_transformed')
+                        })
+
+        print(f"  ViewTransformer applied: added position_transformed to tracks")
+
+        # Step 5.46: Calculate speed and distance using SpeedAndDistance_Estimator
+        print("\n[Step 5.46/8] Calculating speed and distance using SpeedAndDistance_Estimator...")
+        from analytics import SpeedAndDistance_Estimator
+
+        video_info = sv.VideoInfo.from_video_path(video_path)
+        speed_distance_estimator = SpeedAndDistance_Estimator(
+            frame_window=5,
+            frame_rate=video_info.fps
+        )
+
+        # Add speed and distance to tracks (works with position_transformed)
+        speed_distance_estimator.add_speed_and_distance_to_tracks(all_tracks)
+
+        print(f"  SpeedAndDistance_Estimator applied: added speed and distance to tracks")
 
         # Step 5.5: Calculate analytics metrics (BEFORE camera compensation)
         # Use original pixel positions with adaptive homography mapper
@@ -366,14 +474,13 @@ class CompleteSoccerAnalysisPipeline:
         # Force reload of analytics modules to get latest pass detection changes
         import importlib
         import analytics
-        import analytics.enhanced_pass_detector
+        import analytics.robust_pass_detector
         import analytics.improved_player_ball_assigner
         importlib.reload(analytics)
-        importlib.reload(analytics.enhanced_pass_detector)
+        importlib.reload(analytics.robust_pass_detector)
         importlib.reload(analytics.improved_player_ball_assigner)
         from analytics import MetricsCalculator
 
-        video_info = sv.VideoInfo.from_video_path(video_path)
         metrics_calculator = MetricsCalculator(fps=video_info.fps)
 
         # Calculate speeds using original tracks (not camera-compensated)
@@ -1050,6 +1157,51 @@ class CompleteSoccerAnalysisPipeline:
             # psutil not installed, skip memory reporting
             pass
 
+    def launch_coach_chat(self, llm_json_path: str):
+        """
+        Launch interactive coach chat after analysis completes.
+
+        Args:
+            llm_json_path: Path to LLM-formatted JSON output
+        """
+        from pathlib import Path
+
+        print("\n" + "="*70)
+        print("🎯 ANALYSIS COMPLETE - LAUNCHING COACH CHAT")
+        print("="*70)
+
+        # Check API key (should be loaded from .env by now)
+        if not os.environ.get('ANTHROPIC_API_KEY'):
+            print("\n⚠️  ANTHROPIC_API_KEY not set")
+            print("\nTo enable AI coach chat:")
+            print("  1. Get API key from: https://console.anthropic.com/")
+            print("  2. Add to .env file in project root:")
+            print("     ANTHROPIC_API_KEY=sk-ant-...")
+            print("  3. Or set environment variable:")
+            print("     export ANTHROPIC_API_KEY='sk-ant-...'")
+            return
+
+        # Import and launch chat interface
+        try:
+            from llm_assistant.interface import CoachChatInterface
+
+            print(f"\n🚀 Starting interactive chat with analysis from:")
+            print(f"   {Path(llm_json_path).name}")
+            print("\nPress Ctrl+C to exit chat and return to terminal\n")
+
+            # Initialize and run chat interface
+            chat = CoachChatInterface(llm_json_path)
+            chat.run_chat_loop()
+
+        except KeyboardInterrupt:
+            print("\n\n✓ Chat session ended")
+        except Exception as e:
+            print(f"\n❌ Error launching chat: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"\nManual launch:")
+            print(f"  python -m llm_assistant.interface {llm_json_path}")
+
 
 
 if __name__ == "__main__":
@@ -1097,3 +1249,8 @@ if __name__ == "__main__":
         print(f"Output video: {output_video}")
         print(f"Analysis data: {json_output}")
         print(f"LLM-formatted data: {llm_json_output}")
+
+        try:
+            pipeline.launch_coach_chat(llm_json_output)
+        except Exception as e:
+            print(f"\n⚠️  Could not auto-launch chat: {e}")

@@ -130,7 +130,7 @@ class PossessionTracker:
                     team = None
                     if player_tracks.get(possession_start_frame):
                         frame_data = player_tracks[possession_start_frame]
-                        if current_possessing_player in frame_data:
+                        if isinstance(frame_data, dict) and current_possessing_player in frame_data:
                             team = 0  # Default team, will be updated with actual team data
 
                     event = {

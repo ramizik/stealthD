@@ -10,14 +10,20 @@ from .metrics_calculator import MetricsCalculator
 from .enhanced_pass_detector import EnhancedPassDetector
 from .improved_player_ball_assigner import ImprovedPlayerBallAssigner
 from .possession_tracker import PossessionTracker
+from .robust_pass_detector import RobustPassDetector
+from .simple_player_ball_assigner import PlayerBallAssigner as SimplePlayerBallAssigner
+from .speed_and_distance_calculator import SpeedAndDistance_Estimator
 from .speed_calculator import SpeedCalculator
 
 __all__ = [
     'MetricsCalculator',
     'SpeedCalculator',
+    'SpeedAndDistance_Estimator',
     'PossessionTracker',
     'EnhancedPassDetector',
+    'RobustPassDetector',
     'ImprovedPlayerBallAssigner',
+    'SimplePlayerBallAssigner',
     'LLMDataFormatter',
     'BallInterpolator'
 ]

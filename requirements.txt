@@ -45,3 +45,7 @@ scenedetect[opencv]>=0.6.0  # For camera shot boundary detection
 
 # Optional: For better performance
 # numba>=0.50.0  # Uncomment if needed for numerical optimizations
+
+# LLM Integration
+anthropic
+python-dotenv>=1.0.0
