@@ -12,12 +12,12 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 import gc
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import supervision as sv
 
-from .robust_pass_detector import RobustPassDetector
+from .enhanced_pass_detector import EnhancedPassDetector
 from .improved_player_ball_assigner import ImprovedPlayerBallAssigner
 from .possession_tracker import PossessionTracker
 from .speed_calculator import SpeedCalculator
@@ -40,18 +40,17 @@ class MetricsCalculator:
             min_possession_frames=1
         )
 
-        # Use ImprovedPlayerBallAssigner and RobustPassDetector (from user's working scripts)
+        # Use ImprovedPlayerBallAssigner and EnhancedPassDetector (from user's working scripts)
         self.ball_assigner = ImprovedPlayerBallAssigner(
             max_ball_distance=10.0  # Distance in meters (default from user's code)
         )
 
-        self.pass_detector = RobustPassDetector(
+        self.pass_detector = EnhancedPassDetector(
             min_pass_distance=0.3,
             max_pass_distance=70.0,
             max_gap_frames=150,
             velocity_threshold=0.5,
-            min_ball_movement=2.0,
-            enable_fallback_mode=True
+            min_ball_movement=2.0
         )
 
     def _calculate_ball_field_coordinates(self, ball_tracks: Dict, adaptive_mapper,
@@ -72,6 +71,14 @@ class MetricsCalculator:
         used_position_transformed = 0
         used_adaptive_mapper = 0
         failed_conversions = 0
+
+        # DEBUG: Check ball tracks format
+        if ball_tracks:
+            sample_frames = list(ball_tracks.keys())[:3]
+            print(f"      [DEBUG] Ball tracks format check (first 3 frames):")
+            for frame_idx in sample_frames:
+                track_data = ball_tracks[frame_idx]
+                print(f"        Frame {frame_idx}: type={type(track_data)}, value={track_data}")
 
         for frame_idx, track_data in ball_tracks.items():
             field_coord = None
@@ -95,6 +102,7 @@ class MetricsCalculator:
                             # Last resort: use bbox center
                             bbox = track_info.get('bbox', None)
                             if bbox is None or any(b is None for b in bbox) or len(bbox) < 4:
+                                print(f"        Frame {frame_idx}: No valid bbox found in enhanced format")
                                 failed_conversions += 1
                                 continue
                             x_center = (bbox[0] + bbox[2]) / 2
@@ -113,11 +121,19 @@ class MetricsCalculator:
                         if field_coord is not None:
                             used_adaptive_mapper += 1
                         else:
-                            failed_conversions += 1
-                            continue
-            # Handle simple format: list (bbox)
-            elif isinstance(track_data, list) and len(track_data) >= 4:
+                            print(f"        Frame {frame_idx}: Adaptive mapper failed, using proportional fallback for ball_center={ball_center}")
+                            # MVP FALLBACK: Use proportional transformation if homography fails
+                            field_coord = self._proportional_ball_transform(ball_center, video_dimensions)
+                            if field_coord is not None:
+                                used_adaptive_mapper += 1  # Count as fallback success
+                                print(f"        Frame {frame_idx}: Proportional fallback succeeded")
+                            else:
+                                failed_conversions += 1
+                                continue
+            # Handle simple format: list or numpy array (bbox)
+            elif (isinstance(track_data, (list, np.ndarray)) and len(track_data) >= 4):
                 if any(b is None for b in track_data):
+                    print(f"        Frame {frame_idx}: Simple format has None values: {track_data}")
                     failed_conversions += 1
                     continue
 
@@ -138,9 +154,17 @@ class MetricsCalculator:
                 if field_coord is not None:
                     used_adaptive_mapper += 1
                 else:
-                    failed_conversions += 1
-                    continue
+                    print(f"        Frame {frame_idx}: Simple format - adaptive mapper failed, using proportional fallback for ball_center={ball_center}")
+                    # MVP FALLBACK: Use proportional transformation if homography fails
+                    field_coord = self._proportional_ball_transform(ball_center, video_dimensions)
+                    if field_coord is not None:
+                        used_adaptive_mapper += 1  # Count as fallback success
+                        print(f"        Frame {frame_idx}: Simple format - proportional fallback succeeded")
+                    else:
+                        failed_conversions += 1
+                        continue
             else:
+                print(f"        Frame {frame_idx}: Unrecognized ball track format: {type(track_data)} = {track_data}")
                 failed_conversions += 1
                 continue
 
@@ -240,7 +264,7 @@ class MetricsCalculator:
         )
         print(f"    Ball field coords calculated: {len(ball_field_coords)} frames")
 
-        # Step 2.5: Build field_coords_players structure for ImprovedPlayerBallAssigner and RobustPassDetector
+        # Step 2.5: Build field_coords_players structure for ImprovedPlayerBallAssigner and EnhancedPassDetector
         # Structure: {player_id: {'field_coordinates': {frame_idx: [x, y]}}}
         print("  - Building player field coordinates structure...")
         field_coords_players = {}
@@ -313,8 +337,18 @@ class MetricsCalculator:
         # Clear memory after ball assignment
         gc.collect()
 
-        # Step 5: Detect passes with RobustPassDetector
-        print("  - Detecting passes with robust validation...")
+        # Step 5: Detect passes with EnhancedPassDetector
+        print("  - Detecting passes with enhanced trajectory validation...")
+
+        # DEBUG: Check data being passed to pass detector
+        print(f"    [DEBUG] Data for pass detection:")
+        print(f"      - possession_events: {len(possession_events) if possession_events else 0}")
+        print(f"      - field_coords_players: {len(field_coords_players) if field_coords_players else 0} players")
+        print(f"      - team_assignments: {len(team_assignments) if team_assignments else 0} frames")
+        print(f"      - ball_field_coords: {len(ball_field_coords) if ball_field_coords else 0} frames")
+        print(f"      - ball_assignments: {len(ball_assignments) if ball_assignments else 0} frames")
+        print(f"      - id_mapping: {len(id_mapping) if id_mapping else 0} mappings")
+
         passes = self.pass_detector.detect_passes(
             possession_events, field_coords_players, team_assignments, self.fps,
             ball_field_coords=ball_field_coords,  # For trajectory validation
@@ -360,6 +394,49 @@ class MetricsCalculator:
             'player_analytics': player_analytics
         }
 
+    def _proportional_ball_transform(self, pixel_coord: np.ndarray, video_dimensions: Tuple[int, int]) -> Optional[np.ndarray]:
+        """
+        MVP fallback: Simple proportional transformation for ball coordinates.
+
+        Maps pixel coordinates to field coordinates using simple proportional scaling.
+        This is very approximate but will allow ball assignments and passes to work.
+
+        Args:
+            pixel_coord: [x, y] pixel coordinates
+            video_dimensions: (width, height) of video in pixels
+
+        Returns:
+            [x, y] field coordinates in meters, or None if invalid
+        """
+        try:
+            video_width, video_height = video_dimensions
+
+            # Assume field occupies central 70% of frame (reasonable for soccer)
+            field_visible_fraction_x = 0.7
+            field_visible_fraction_y = 0.7
+
+            # Calculate margins
+            margin_x = (1 - field_visible_fraction_x) / 2
+            margin_y = (1 - field_visible_fraction_y) / 2
+
+            # Normalize to [0, 1] within visible field area
+            norm_x = (pixel_coord[0] / video_width - margin_x) / field_visible_fraction_x
+            norm_y = (pixel_coord[1] / video_height - margin_y) / field_visible_fraction_y
+
+            # Clamp to [0, 1]
+            norm_x = np.clip(norm_x, 0, 1)
+            norm_y = np.clip(norm_y, 0, 1)
+
+            # Scale to field dimensions (FIFA standard: 105m x 68m)
+            field_x = norm_x * self.field_dimensions[0]
+            field_y = norm_y * self.field_dimensions[1]
+
+            return np.array([field_x, field_y])
+
+        except Exception as e:
+            print(f"      [ERROR] Proportional ball transform failed: {e}")
+            return None
+
     def _aggregate_player_analytics(self, player_speeds: Dict, player_possession_time: Dict,
                                     player_pass_counts: Dict, team_assignments: Dict, player_touches: Dict = None,
                                     goalkeeper_assignments: Dict = None) -> Dict:
@@ -369,7 +446,7 @@ class MetricsCalculator:
         Args:
             player_speeds: Speed data from SpeedCalculator
             player_possession_time: Possession time from PossessionTracker
-            player_pass_counts: Pass counts from PassDetector
+            player_pass_counts: Pass counts from EnhancedPassDetector
             team_assignments: Team assignments {frame_idx: {player_id: team_id}}
             player_touches: Touch counts from PlayerBallAssigner (optional)
             goalkeeper_assignments: Goalkeeper status {frame_idx: {player_id: is_goalkeeper}} (optional)

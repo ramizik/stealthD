@@ -132,16 +132,6 @@ class ImprovedPlayerBallAssigner:
 
         frame_indices = sorted(set(player_tracks.keys()) & set(ball_tracks.keys()))
 
-        if len(frame_indices) == 0:
-            print(f"      [WARNING] No common frames between player_tracks ({len(player_tracks)}) and ball_tracks ({len(ball_tracks)})")
-            return ball_assignments
-
-        frames_with_assignments = 0
-        frames_without_player_coords = 0
-        frames_without_ball_coords = 0
-        frames_with_no_players = 0
-        frames_with_no_ball = 0
-
         for frame_idx in frame_indices:
             # Get player positions at this frame
             player_positions = {}
@@ -157,16 +147,6 @@ class ImprovedPlayerBallAssigner:
                 ball_coords = field_coords_ball[frame_idx]
                 if ball_coords is not None and len(ball_coords) == 2:
                     ball_position = np.array(ball_coords)
-                else:
-                    frames_without_ball_coords += 1
-            else:
-                frames_without_ball_coords += 1
-
-            # Debug tracking
-            if len(player_positions) == 0:
-                frames_with_no_players += 1
-            if ball_position is None:
-                frames_with_no_ball += 1
 
             # Assign ball to player
             result = self.assign_ball_to_player(player_positions, ball_position)
@@ -174,16 +154,6 @@ class ImprovedPlayerBallAssigner:
             if result is not None:
                 player_id, distance = result
                 ball_assignments[int(frame_idx)] = (int(player_id), float(distance))
-                frames_with_assignments += 1
-
-        # Debug output
-        if len(frame_indices) > 0:
-            print(f"      Processed {len(frame_indices)} common frames:")
-            print(f"        - {frames_with_assignments} frames with assignments")
-            print(f"        - {frames_with_no_players} frames with no player field coords")
-            print(f"        - {frames_with_no_ball} frames with no ball field coords")
-            if frames_with_assignments == 0:
-                print(f"      [DEBUG] max_ball_distance threshold: {self.max_ball_distance}m")
 
         return ball_assignments
 

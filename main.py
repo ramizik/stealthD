@@ -474,10 +474,10 @@ class CompleteSoccerAnalysisPipeline:
         # Force reload of analytics modules to get latest pass detection changes
         import importlib
         import analytics
-        import analytics.robust_pass_detector
+        import analytics.enhanced_pass_detector
         import analytics.improved_player_ball_assigner
         importlib.reload(analytics)
-        importlib.reload(analytics.robust_pass_detector)
+        importlib.reload(analytics.enhanced_pass_detector)
         importlib.reload(analytics.improved_player_ball_assigner)
         from analytics import MetricsCalculator
 
@@ -774,72 +774,6 @@ class CompleteSoccerAnalysisPipeline:
 
         return analysis_data
 
-    def _process_frames(self, frames, video_path, cache_path, frame_count):
-        """Process all frames with detections, tracking, and team assignment."""
-        all_tracks = {'player': {}, 'ball': {}, 'referee': {}, 'player_classids': {}}
-
-        # Initialize global homography mapper
-        from tactical_analysis.global_homography_mapper import \
-            GlobalHomographyMapper
-        global_mapper = GlobalHomographyMapper()
-
-        print(f"  [Global Homography] Accumulating keypoints from {len(frames)} frames...")
-
-        # Configure progress bar to update less frequently (every 2 seconds or ~5% of frames)
-        update_interval = max(1, len(frames) // 20)  # Update 20 times max
-        for i, frame in enumerate(tqdm(frames, desc="Processing frames",
-                                       mininterval=2.0, miniters=update_interval,
-                                       ncols=100, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')):
-
-            # Detect keypoints and objects
-            keypoints, _ = self.keypoint_pipeline.detect_keypoints_in_frame(frame)
-            player_detections, ball_detections, referee_detections = self.detection_pipeline.detect_frame_objects(frame)
-
-            # Filter ball detections using tracker (removes anomalies)
-            ball_detections = self.ball_tracker.update(ball_detections)
-
-            # Accumulate keypoints for global homography (instead of per-frame transformer)
-            global_mapper.add_frame_keypoints(i, keypoints)
-
-            # Update with tracking
-            player_detections = self.tracking_pipeline.tracking_callback(player_detections)
-
-            # Team assignment
-            player_detections, _ = self.tracking_pipeline.clustering_callback(frame, player_detections, frame_idx=i)
-
-            # Store tracks for interpolation
-            all_tracks = self.tracking_pipeline.convert_detection_to_tracks(player_detections, ball_detections, referee_detections, all_tracks, i)
-
-            # Periodic memory cleanup every 100 frames to prevent accumulation
-            if (i + 1) % 100 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
-
-        # Build global homography from all accumulated keypoints
-        print(f"\n  [Step 4.5/8] Building global homography from accumulated keypoints...")
-        homography_success = global_mapper.build_global_homography()
-
-        if not homography_success:
-            print(f"  [WARNING] Failed to build global homography. Analytics may be inaccurate.")
-
-        # Save cache (now includes global mapper instead of per-frame transformers)
-        print(f"\n  Saving frame processing cache to: {cache_path.name}")
-        try:
-            cached_data = {
-                'all_tracks': all_tracks,
-                'global_mapper': global_mapper,  # Changed from view_transformers
-                'num_frames': len(frames),
-                'frame_count': frame_count,
-                'cache_version': 2  # Version 2 uses global mapper
-            }
-            with open(cache_path, 'wb') as f:
-                pickle.dump(cached_data, f)
-            print(f"  Cache saved successfully")
-        except Exception as e:
-            print(f"  Warning: Failed to save cache: {e}")
-
-        return all_tracks, global_mapper
 
     def _visualize_keypoints(self, frame: np.ndarray, keypoints: 'sv.KeyPoints',
                             frame_idx: int, output_dir: Path):

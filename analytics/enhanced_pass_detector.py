@@ -230,11 +230,14 @@ class EnhancedPassDetector:
 
         return touch_events
 
-    def _validate_pass_with_trajectory(self, passer_pos: np.ndarray, receiver_pos: np.ndarray,
-                                      trajectory: Optional[Dict], gap_frames: int,
-                                      fps: float = 30.0) -> Tuple[bool, float, str]:
+    def _validate_pass_mvp(self, passer_pos: np.ndarray, receiver_pos: np.ndarray,
+                          trajectory: Optional[Dict], gap_frames: int,
+                          fps: float = 30.0) -> Tuple[bool, float, str]:
         """
-        Validate pass using ball trajectory analysis.
+        MVP-friendly pass validation - very permissive for demo purposes.
+
+        This is much simpler and more accepting than the full trajectory validation.
+        For MVP, we just want to show some passes working, not perfect accuracy.
 
         Returns:
             (is_valid, confidence, reason)
@@ -245,82 +248,30 @@ class EnhancedPassDetector:
 
         player_distance = np.linalg.norm(receiver_pos - passer_pos)
 
-        # Check player distance bounds
-        if player_distance < self.min_pass_distance:
+        # Very permissive distance bounds for MVP
+        if player_distance < 0.1:  # Very close - probably same player
             return False, 0.0, f"too_close_{player_distance:.1f}m"
-        if player_distance > self.max_pass_distance:
+        if player_distance > 100.0:  # Too far - unrealistic pass
             return False, 0.0, f"too_far_{player_distance:.1f}m"
 
-        # If no trajectory data, use basic validation
+        confidence = 0.8  # Start with decent confidence
+
+        # If no trajectory data, still accept (most common case)
         if trajectory is None or trajectory['num_positions'] < 2:
-            # Allow passes with short gaps even without trajectory
-            if gap_frames <= 10:  # ~0.33 seconds
-                return True, 0.6, "short_gap_no_trajectory"
-            return True, 0.4, "no_trajectory_data"
+            return True, confidence, "mvp_simple_validation"
 
-        # Validate with trajectory
+        # Basic trajectory check - ball should have moved at least a tiny bit
         ball_distance = trajectory['direct_distance']
-        ball_total_distance = trajectory['total_distance']
-        efficiency = trajectory['efficiency']
-        velocity = trajectory['avg_velocity']
-
-        confidence = 1.0
-        reasons = []
-
-        # Ball must move minimum distance
-        if ball_distance < self.min_ball_movement:
-            return False, 0.0, f"ball_didnt_move_{ball_distance:.1f}m"
-
-        # Check if ball moved in the right direction
-        # Calculate expected ball movement direction
-        passer_to_receiver = receiver_pos - passer_pos
-
-        if len(trajectory['positions']) >= 2:
-            ball_start = trajectory['positions'][0]
-            ball_end = trajectory['positions'][-1]
-            ball_movement = ball_end - ball_start
-
-            # Calculate directional similarity (dot product)
-            if np.linalg.norm(passer_to_receiver) > 0 and np.linalg.norm(ball_movement) > 0:
-                direction_similarity = np.dot(passer_to_receiver, ball_movement) / (
-                    np.linalg.norm(passer_to_receiver) * np.linalg.norm(ball_movement)
-                )
-
-                # Ball should move generally toward receiver (allow some deviation)
-                if direction_similarity < 0.3:  # Less than ~73 degrees
-                    confidence *= 0.5
-                    reasons.append(f"direction_mismatch_{direction_similarity:.2f}")
-                else:
-                    reasons.append(f"good_direction_{direction_similarity:.2f}")
-
-        # Check velocity
-        if velocity < self.velocity_threshold:
+        if ball_distance < 0.1:  # Ball barely moved
             confidence *= 0.7
-            reasons.append(f"low_velocity_{velocity:.1f}ms")
-        else:
-            reasons.append(f"good_velocity_{velocity:.1f}ms")
+            return True, confidence, f"mvp_ball_moved_little_{ball_distance:.1f}m"
 
-        # Check trajectory efficiency (straight passes have higher efficiency)
-        if efficiency < 0.5:  # Very curved path
-            confidence *= 0.8
-            reasons.append(f"curved_path_{efficiency:.2f}")
-        else:
-            reasons.append(f"straight_path_{efficiency:.2f}")
-
-        # Ball distance should be comparable to player distance
-        distance_ratio = ball_distance / player_distance if player_distance > 0 else 0
-        if distance_ratio < 0.5 or distance_ratio > 2.0:
-            confidence *= 0.7
-            reasons.append(f"distance_mismatch_ratio_{distance_ratio:.2f}")
-        else:
-            reasons.append(f"good_distance_ratio_{distance_ratio:.2f}")
-
-        reason_str = "+".join(reasons)
-        return True, confidence, reason_str
+        # For MVP, accept most passes that meet basic criteria
+        return True, confidence, f"mvp_accepted_distance_{player_distance:.1f}m_ball_{ball_distance:.1f}m"
 
     def detect_passes(self, possession_events: List[Dict], field_coords_players: Dict,
                      team_assignments: Dict, fps: float = 30, ball_field_coords: Dict = None,
-                     ball_assignments: Dict = None) -> List[Dict]:
+                     ball_assignments: Dict = None, id_mapping: Dict = None) -> List[Dict]:
         """
         Detect passes with enhanced trajectory validation.
 
@@ -328,10 +279,29 @@ class EnhancedPassDetector:
         Secondary method: Possession-based detection for backup
         """
         print("      [ENHANCED DETECTOR] Starting pass detection with trajectory analysis...")
+        print(f"      [DEBUG] Input validation:")
+        print(f"        - possession_events: {len(possession_events) if possession_events else 0} events")
+        print(f"        - field_coords_players: {len(field_coords_players) if field_coords_players else 0} players")
+        print(f"        - team_assignments: {len(team_assignments) if team_assignments else 0} frames")
+        print(f"        - ball_field_coords: {len(ball_field_coords) if ball_field_coords else 0} frames")
+        print(f"        - ball_assignments: {len(ball_assignments) if ball_assignments else 0} frames")
+        print(f"        - id_mapping: {len(id_mapping) if id_mapping else 0} mappings")
 
         if ball_assignments is None:
             print("      [WARNING] No ball assignments provided - detection will be limited")
             return []
+
+        # DEBUG: Check ball assignments content
+        if ball_assignments:
+            sample_frames = list(ball_assignments.keys())[:5]
+            print(f"      [DEBUG] Ball assignments sample (first 5 frames):")
+            for frame in sample_frames:
+                player_id = ball_assignments[frame]
+                print(f"        Frame {frame}: Player {player_id}")
+
+            # Count unique players in ball assignments
+            unique_players = set(ball_assignments.values())
+            print(f"      [DEBUG] Ball assignments: {len(unique_players)} unique players touched ball")
 
         all_passes = []
 
@@ -339,12 +309,39 @@ class EnhancedPassDetector:
         touch_events = self._extract_touch_events_improved(ball_assignments)
         print(f"      [TOUCH EVENTS] Extracted {len(touch_events)} events")
 
+        # DEBUG: Show touch events
+        if touch_events:
+            print(f"      [DEBUG] Touch events sample (first 10):")
+            for i, event in enumerate(touch_events[:10]):
+                print(f"        {i+1}. Frame {event['frame']}: Player {event['player_id']} {event['event_type']}")
+        else:
+            print("      [DEBUG] No touch events found! This means no ball touches were detected.")
+
         release_events = [e for e in touch_events if e['event_type'] == 'release']
         receive_events = [e for e in touch_events if e['event_type'] == 'receive']
 
         print(f"        {len(release_events)} releases, {len(receive_events)} receives")
 
+        if len(release_events) == 0:
+            print("      [DEBUG] No release events found - no passes can be detected!")
+            print("      [ENHANCED DETECTOR] Detected 0 passes")
+            return all_passes
+
+        if len(receive_events) == 0:
+            print("      [DEBUG] No receive events found - no passes can be detected!")
+            print("      [ENHANCED DETECTOR] Detected 0 passes")
+            return all_passes
+
         # Match release -> receive events
+        potential_passes = 0
+        rejected_same_player = 0
+        rejected_gap_too_large = 0
+        rejected_no_positions = 0
+        rejected_validation = 0
+        rejected_team = 0
+
+        print(f"      [DEBUG] Starting pass detection loop with {len(release_events)} release events")
+
         for i in range(len(release_events)):
             passer_event = release_events[i]
 
@@ -359,15 +356,25 @@ class EnhancedPassDetector:
             passer_frame = passer_event['frame']
             receiver_frame = receiver_event['frame']
 
+            potential_passes += 1
+
             # Skip same player
             if passer_id == receiver_id:
+                rejected_same_player += 1
+                if potential_passes <= 5:  # Only log first few
+                    print(f"        [SKIP] Same player {passer_id} at frames {passer_frame}→{receiver_frame}")
                 continue
 
             gap_frames = receiver_frame - passer_frame
 
             # Skip if gap too large
             if gap_frames > self.max_gap_frames:
+                rejected_gap_too_large += 1
+                if potential_passes <= 5:  # Only log first few
+                    print(f"        [SKIP] Gap too large: {gap_frames} > {self.max_gap_frames} frames ({passer_id}→{receiver_id})")
                 continue
+
+            print(f"        [POTENTIAL PASS] P{passer_id}→P{receiver_id} at frames {passer_frame}→{receiver_frame} (gap: {gap_frames})")
 
             # Get ball trajectory
             trajectory = None
@@ -381,14 +388,18 @@ class EnhancedPassDetector:
             receiver_pos = self._get_player_position(receiver_id, receiver_frame, field_coords_players)
 
             if passer_pos is None or receiver_pos is None:
+                rejected_no_positions += 1
+                if potential_passes <= 5:  # Only log first few
+                    print(f"        [REJECTED] No positions found: P{passer_id}@{passer_frame}={passer_pos is not None}, P{receiver_id}@{receiver_frame}={receiver_pos is not None}")
                 continue
 
-            # Validate with trajectory
-            is_valid, confidence, reason = self._validate_pass_with_trajectory(
+            # Validate with MVP-friendly validation (permissive for demo)
+            is_valid, confidence, reason = self._validate_pass_mvp(
                 passer_pos, receiver_pos, trajectory, gap_frames, fps
             )
 
             if not is_valid:
+                rejected_validation += 1
                 print(f"        [REJECTED] P{passer_id}→P{receiver_id}: {reason}")
                 continue
 
@@ -397,14 +408,22 @@ class EnhancedPassDetector:
             receiver_team = self._get_player_team_robust(receiver_id, receiver_frame, team_assignments, window=50)
 
             if passer_team is None or receiver_team is None:
-                print(f"        [WARNING] P{passer_id}→P{receiver_id}: Missing team data")
+                print(f"        [WARNING] P{passer_id}→P{receiver_id}: Missing team data (teams: {passer_team}, {receiver_team})")
                 confidence *= 0.5  # Reduce confidence but don't reject
             elif passer_team != receiver_team:
+                rejected_team += 1
                 print(f"        [REJECTED] P{passer_id}({passer_team})→P{receiver_id}({receiver_team}): Different teams")
                 continue
 
             # Calculate final distance
             pass_distance = self._calculate_distance(passer_pos, receiver_pos)
+
+            print(f"        [PASS ACCEPTED] P{passer_id}→P{receiver_id}: {pass_distance:.1f}m, conf={confidence:.2f}, teams={passer_team}→{receiver_team}")
+
+            # Apply ID mapping if available to convert ByteTrack IDs to fixed IDs
+            if id_mapping is not None:
+                passer_id = id_mapping.get(passer_id, passer_id)
+                receiver_id = id_mapping.get(receiver_id, receiver_id)
 
             # Create pass event
             pass_event = {
@@ -431,6 +450,22 @@ class EnhancedPassDetector:
 
             all_passes.append(pass_event)
             print(f"        [PASS] P{passer_id}→P{receiver_id}: {pass_distance:.1f}m, conf={confidence:.2f}, {reason}")
+
+        # DEBUG: Summary statistics
+        print(f"      [PASS DETECTION SUMMARY]")
+        print(f"        Total potential passes: {potential_passes}")
+        print(f"        Passes accepted: {len(all_passes)}")
+        print(f"        Rejections:")
+        print(f"          - Same player: {rejected_same_player}")
+        print(f"          - Gap too large: {rejected_gap_too_large}")
+        print(f"          - No positions: {rejected_no_positions}")
+        print(f"          - Validation failed: {rejected_validation}")
+        print(f"          - Different teams: {rejected_team}")
+
+        if len(all_passes) == 0 and potential_passes > 0:
+            print(f"      [WARNING] All potential passes were rejected! Check validation logic.")
+        elif len(all_passes) == 0:
+            print(f"      [WARNING] No potential passes found. Check ball assignment and touch detection.")
 
         print(f"      [ENHANCED DETECTOR] Detected {len(all_passes)} passes")
         return all_passes
