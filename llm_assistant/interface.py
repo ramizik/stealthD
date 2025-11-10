@@ -1,14 +1,15 @@
-#!/usr/bin/env python3
-
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Dict, List
 
-# Load environment variables from .env file
-from dotenv import load_dotenv
-load_dotenv()
+# Load environment variables from .env file if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not required
 
 import anthropic
 
@@ -23,7 +24,7 @@ class CoachChatInterface:
         Args:
             analysis_json_path: Path to LLM-formatted analysis JSON
         """
-        # Load API key (from .env file or environment variable)
+        # Load API key
         self.api_key = os.environ.get('ANTHROPIC_API_KEY')
         if not self.api_key:
             print("❌ ERROR: ANTHROPIC_API_KEY not found")
@@ -46,18 +47,88 @@ class CoachChatInterface:
         # Conversation history
         self.conversation_history = []
 
+        # Assess data quality first
+        self.data_quality = self._assess_data_quality()
+
         # Build system context once
         self.system_context = self._build_system_context()
 
         print(f"✓ Loaded match data from: {Path(analysis_json_path).name}")
 
-    def _build_system_context(self) -> str:
-        """
-        Build system context from match data.
+        # Warn about data quality if needed
+        if self.data_quality['severity'] == 'critical':
+            print(f"\n⚠️  WARNING: Data quality is limited")
+            print(f"   - {self.data_quality['warning']}")
+            print(f"   - Insights will be general/limited\n")
 
-        This creates a concise summary that Claude can use for all questions.
+    def _assess_data_quality(self) -> Dict:
+        """
+        Assess quality of input data to adjust LLM behavior.
+
+        Returns:
+            Dict with quality assessment and warnings
         """
         data = self.match_data
+
+        # Check for critical missing data
+        team_stats = data.get('team_statistics', {})
+        players = data.get('player_statistics', {})
+
+        team_0 = team_stats.get('team_0', {})
+        team_1 = team_stats.get('team_1', {})
+
+        passes_0 = team_0.get('passing', {}).get('passes_completed', 0)
+        passes_1 = team_1.get('passing', {}).get('passes_completed', 0)
+        possession_0 = team_0.get('possession', {}).get('possession_percentage', 0)
+        possession_1 = team_1.get('possession', {}).get('possession_percentage', 0)
+
+        # Calculate issues
+        issues = []
+        severity = 'good'
+
+        # Critical: No passes detected
+        if passes_0 == 0 and passes_1 == 0:
+            issues.append("No passes detected - passing analysis unavailable")
+            severity = 'critical'
+
+        # Critical: No possession data
+        if possession_0 == 0 and possession_1 == 0:
+            issues.append("No possession data - tactical analysis limited")
+            if severity != 'critical':
+                severity = 'critical'
+
+        # Warning: Short clip
+        duration = data.get('match_summary', {}).get('duration_seconds', 0)
+        if duration < 60:
+            issues.append(f"Very short clip ({duration}s) - patterns may not be meaningful")
+            if severity == 'good':
+                severity = 'warning'
+
+        # Check for zero touches
+        total_touches = sum(
+            p.get('possession', {}).get('touches', 0)
+            for p in players.values()
+        )
+        if total_touches == 0:
+            issues.append("No ball touches recorded - possession analysis unavailable")
+            severity = 'critical'
+
+        return {
+            'severity': severity,
+            'issues': issues,
+            'warning': issues[0] if issues else None,
+            'has_passes': passes_0 > 0 or passes_1 > 0,
+            'has_possession': possession_0 > 0 or possession_1 > 0,
+            'has_touches': total_touches > 0,
+            'duration_seconds': duration
+        }
+
+    def _build_system_context(self) -> str:
+        """
+        Build system context from match data with honest quality assessment.
+        """
+        data = self.match_data
+        quality = self.data_quality
 
         # Extract key info
         summary = data.get('match_summary', {})
@@ -76,59 +147,89 @@ class CoachChatInterface:
         # Top performers
         top_players = self._get_top_performers(players, n=5)
 
-        context = f"""You are an expert soccer coach analyzing match data from an AI vision system.
+        # Build data quality warning
+        quality_warning = ""
+        if quality['severity'] == 'critical':
+            quality_warning = f"""
+CRITICAL DATA LIMITATIONS:
+This analysis has SEVERE data quality issues. Your responses MUST acknowledge these limitations:
+- {' / '.join(quality['issues'])}
 
-**MATCH CONTEXT:**
-- Duration: {duration:.0f} seconds ({duration/60:.1f} minutes)
-- Teams: {team_0.get('name', 'Team 0')} vs {team_1.get('name', 'Team 1')}
-- Players Tracked: {len(players)} total
+You can ONLY analyze:
+- Player movement and distance (this IS tracked)
+- Relative speed comparisons between players
+- Team movement patterns (who covered more ground)
 
-**TEAM 0 ({team_0.get('name', 'Team 0')}) - Blue:**
-- Total Distance: {team_0_overall.get('total_distance_km', 0):.2f} km
-- Avg Speed: {team_0_overall.get('average_speed_kmh', 0):.1f} km/h
-- Passes: {team_0.get('passing', {}).get('passes_completed', 0)}
-- Possession: {team_0.get('possession', {}).get('possession_percentage', 0):.0f}%
+You CANNOT accurately analyze:
+- Passing patterns (no pass data)
+- Possession tactics (no possession data)
+- Tactical formations (insufficient data)
+- Ball control or touches (not reliably tracked)
 
-**TEAM 1 ({team_1.get('name', 'Team 1')}) - Red:**
-- Total Distance: {team_1_overall.get('total_distance_km', 0):.2f} km
-- Avg Speed: {team_1_overall.get('average_speed_kmh', 0):.1f} km/h
-- Passes: {team_1.get('passing', {}).get('passes_completed', 0)}
-- Possession: {team_1.get('possession', {}).get('possession_percentage', 0):.0f}%
+RESPONSE STYLE:
+- Start with honest caveat about data limitations
+- Focus ONLY on what IS tracked (movement, speed, distance)
+- Use plain conversational language - NO markdown, NO bullet points, NO asterisks
+- Be helpful but honest - don't make up insights from missing data
+"""
+        else:
+            quality_warning = """
+DATA QUALITY:
+Early-stage computer vision with ~80% accuracy. Focus on trends and patterns, not precision.
+"""
 
-**TOP 5 PERFORMERS:**
+        context = f"""You are a helpful soccer coach analyzing match data from an AI vision system.
+
+{quality_warning}
+
+MATCH CONTEXT:
+Duration: {duration:.0f} seconds ({duration/60:.1f} minutes)
+Teams: {team_0.get('name', 'Team 0')} (Blue) vs {team_1.get('name', 'Team 1')} (Red)
+Players Tracked: {len(players)} total
+
+TEAM 0 (Blue):
+Total Distance: {team_0_overall.get('total_distance_km', 0):.2f} km
+Avg Speed: {team_0_overall.get('average_speed_kmh', 0):.1f} km/h
+Passes Detected: {team_0.get('passing', {}).get('passes_completed', 0)}
+Possession: {team_0.get('possession', {}).get('possession_percentage', 0):.0f}%
+
+TEAM 1 (Red):
+Total Distance: {team_1_overall.get('total_distance_km', 0):.2f} km
+Avg Speed: {team_1_overall.get('average_speed_kmh', 0):.1f} km/h
+Passes Detected: {team_1.get('passing', {}).get('passes_completed', 0)}
+Possession: {team_1.get('possession', {}).get('possession_percentage', 0):.0f}%
+
+TOP 5 MOST ACTIVE PLAYERS:
 {top_players}
 
-**DATA QUALITY NOTE:**
-This is early-stage computer vision with ~80% accuracy. Focus on:
-- Comparative patterns (Team A vs Team B)
-- Relative player performance (Player X vs Player Y)
-- Statistical trends (not individual frame precision)
+RESPONSE FORMAT - CRITICAL:
+- Write in plain, natural conversation style
+- NO markdown formatting (no **, no bullet points, no headers, no lists)
+- NO asterisks or special characters for emphasis
+- Just talk like a human coach would
+- Use line breaks for readability, but keep it conversational
+- Be concise - 3-5 sentences unless asked for detail
 
-**YOUR ROLE:**
-Answer the coach's questions with:
-1. Direct, actionable insights
-2. Specific references to the data
-3. Honest caveats when data is limited
-4. Coaching recommendations when appropriate
-
-Keep responses concise and focused on what the coach asked."""
+RESPONSE APPROACH:
+1. If question requires missing data (passes/possession), say so honestly upfront
+2. Focus on what IS available (movement, speed, distance comparisons)
+3. Give practical coaching insights based on available data only
+4. Don't speculate beyond what the data shows
+5. Keep it conversational and helpful despite limitations"""
 
         return context
 
     def _get_top_performers(self, players: Dict, n: int = 5) -> str:
-        """Format top N performers."""
+        """Format top N performers by movement/activity."""
 
-        # Score each player
+        # Score by distance and speed (what we DO have)
         scored = []
         for pid, stats in players.items():
             performance = stats.get('performance', {})
-            passing = stats.get('passing', {})
-            possession = stats.get('possession', {})
 
             score = (
                 performance.get('distance_covered_km', 0) * 100 +
-                passing.get('passes_completed', 0) * 10 +
-                possession.get('touches', 0) * 5
+                performance.get('average_speed_kmh', 0) * 2
             )
 
             scored.append((pid, stats, score))
@@ -169,8 +270,8 @@ Keep responses concise and focused on what the coach asked."""
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
-                temperature=0.3,  # Lower = more factual
+                max_tokens=1024,  # Shorter responses
+                temperature=0.3,  # More factual
                 system=self.system_context,
                 messages=self.conversation_history
             )
@@ -200,8 +301,12 @@ Keep responses concise and focused on what the coach asked."""
         print("\nCommands:")
         print("  - Ask any question about the match")
         print("  - Type 'quit' or 'exit' to end")
-        print("  - Type 'summary' for a quick match overview")
+        print("  - Type 'summary' for match overview")
         print("  - Type 'help' for example questions")
+
+        if self.data_quality['severity'] == 'critical':
+            print("\n⚠️  Note: Limited data - focus on movement/speed questions")
+
         print("\n" + "="*70 + "\n")
 
         while True:
@@ -222,7 +327,10 @@ Keep responses concise and focused on what the coach asked."""
                     continue
 
                 if question.lower() == 'summary':
-                    question = "Give me a 3-sentence summary of this match highlighting the most important insights."
+                    if self.data_quality['severity'] == 'critical':
+                        question = "Give me a brief summary focusing on what data IS available - player movement and work rate."
+                    else:
+                        question = "Give me a 3-sentence summary of this match."
 
                 # Ask Claude
                 print("\n🤖 AI Coach: ", end='', flush=True)
@@ -238,19 +346,30 @@ Keep responses concise and focused on what the coach asked."""
                 break
 
     def _show_example_questions(self):
-        """Show example questions to ask."""
-        examples = [
-            "Which team dominated and why?",
-            "Who were the most active players?",
-            "What should Team 0 work on in training?",
-            "How did the teams compare in terms of pressing?",
-            "Which players covered the most distance?",
-            "What tactical adjustments would you recommend?",
-            "Who was the most efficient passer?",
-            "How did Team 1's formation affect their performance?",
-        ]
+        """Show example questions based on data quality."""
 
-        print("\n💡 Example Questions:")
+        if self.data_quality['severity'] == 'critical':
+            # Limited data - show movement-focused questions
+            examples = [
+                "Which team was more active in terms of movement?",
+                "Who covered the most distance?",
+                "Which players showed the highest work rate?",
+                "How did the teams compare in average speed?",
+                "Who was the fastest player?",
+            ]
+            print("\n💡 Questions you CAN ask (based on available data):")
+        else:
+            # Full data - show all questions
+            examples = [
+                "Which team dominated and why?",
+                "Who were the most active players?",
+                "What should Team 0 work on in training?",
+                "Which players covered the most distance?",
+                "Who was the fastest player?",
+                "What tactical adjustments would you recommend?",
+            ]
+            print("\n💡 Example Questions:")
+
         for i, q in enumerate(examples, 1):
             print(f"  {i}. {q}")
         print()
