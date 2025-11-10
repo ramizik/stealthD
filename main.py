@@ -354,6 +354,14 @@ class CompleteSoccerAnalysisPipeline:
 
         team_stabilizer = TeamStabilizer(min_frames_threshold=10)
         all_tracks['player_classids'] = team_stabilizer.stabilize_teams(all_tracks['player_classids'])
+        all_tracks['player_classids'] = team_stabilizer.refine_with_color(
+            all_tracks['player'],
+            all_tracks['player_classids'],
+            video_path,
+            ambiguous_threshold=70.0,
+            seed_threshold=85.0,
+            max_samples_per_player=20
+        )
 
         team_summary = team_stabilizer.get_team_summary()
         print(f"  Team stabilization complete:")
@@ -490,7 +498,8 @@ class CompleteSoccerAnalysisPipeline:
             adaptive_mapper,
             video_info,
             camera_movement,  # Pass camera movement for transformation
-            id_mapper.bytetrack_to_fixed  # Pass ID mapping for pass detection
+            id_mapper.bytetrack_to_fixed,  # Pass ID mapping for pass detection
+            team_override=team_stabilizer.color_based_teams
         )
 
         # Step 5.55: Print adaptive homography statistics

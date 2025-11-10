@@ -184,7 +184,8 @@ class MetricsCalculator:
         return ball_field_coords
 
     def calculate_all_metrics(self, all_tracks: Dict, adaptive_mapper,
-                             video_info: sv.VideoInfo, camera_movement: list = None, id_mapping: Dict = None) -> Dict:
+                             video_info: sv.VideoInfo, camera_movement: list = None,
+                             id_mapping: Dict = None, team_override: Dict[int, int] = None) -> Dict:
         """
         Calculate all analytics metrics from tracking data using adaptive homography.
 
@@ -353,7 +354,8 @@ class MetricsCalculator:
             possession_events, field_coords_players, team_assignments, self.fps,
             ball_field_coords=ball_field_coords,  # For trajectory validation
             ball_assignments=ball_assignments,     # For touch validation
-            id_mapping=id_mapping                  # For ID conversion from ByteTrack to fixed IDs
+            id_mapping=id_mapping,                 # For ID conversion from ByteTrack to fixed IDs
+            team_override=team_override
         )
 
         # Count passes per player
@@ -372,7 +374,7 @@ class MetricsCalculator:
         print("  - Aggregating player analytics...")
         player_analytics = self._aggregate_player_analytics(
             player_speeds, player_possession_time, player_pass_counts, team_assignments,
-            player_touches, goalkeeper_assignments
+            player_touches, goalkeeper_assignments, team_override=team_override
         )
 
         print(f"Analytics complete: {len(player_analytics)} players, {len(passes)} passes detected, {sum(player_touches.values())} total touches")
@@ -439,7 +441,7 @@ class MetricsCalculator:
 
     def _aggregate_player_analytics(self, player_speeds: Dict, player_possession_time: Dict,
                                     player_pass_counts: Dict, team_assignments: Dict, player_touches: Dict = None,
-                                    goalkeeper_assignments: Dict = None) -> Dict:
+                                    goalkeeper_assignments: Dict = None, team_override: Dict[int, int] = None) -> Dict:
         """
         Aggregate all analytics data per player.
 
@@ -467,7 +469,7 @@ class MetricsCalculator:
             analytics = {}
 
             # Get team assignment (use most common team for this player)
-            player_team = self._get_player_team(player_id, team_assignments)
+            player_team = self._get_player_team(player_id, team_assignments, team_override=team_override)
             if player_team is not None:
                 analytics['team'] = int(player_team)
 
@@ -523,7 +525,8 @@ class MetricsCalculator:
 
         return False
 
-    def _get_player_team(self, player_id: int, team_assignments: Dict) -> int:
+    def _get_player_team(self, player_id: int, team_assignments: Dict,
+                         team_override: Dict[int, int] = None) -> int:
         """
         Get the most common team assignment for a player.
 
@@ -541,7 +544,14 @@ class MetricsCalculator:
                 team_votes.append(frame_teams[player_id])
 
         if not team_votes:
+            if team_override and player_id in team_override:
+                return team_override[player_id]
             return None
 
         # Return most common team
-        return max(set(team_votes), key=team_votes.count)
+        majority_team = max(set(team_votes), key=team_votes.count)
+
+        if team_override and player_id in team_override:
+            return team_override[player_id]
+
+        return majority_team

@@ -138,7 +138,8 @@ class EnhancedPassDetector:
         }
 
     def _get_player_team_robust(self, player_id: int, center_frame: int,
-                               team_assignments: Dict, window: int = 50) -> Optional[int]:
+                               team_assignments: Dict, window: int = 50,
+                               team_override: Optional[Dict[int, int]] = None) -> Optional[int]:
         """
         Get player's team with robust temporal analysis.
 
@@ -151,6 +152,9 @@ class EnhancedPassDetector:
         Returns:
             Team ID or None
         """
+        if team_override and player_id in team_override:
+            return team_override[player_id]
+
         team_votes = []
 
         # Check temporal window
@@ -176,6 +180,9 @@ class EnhancedPassDetector:
         agreement = count / len(team_votes)
         if agreement >= 0.6:
             return most_common_team
+
+        if team_override and player_id in team_override:
+            return team_override[player_id]
 
         return None
 
@@ -271,7 +278,8 @@ class EnhancedPassDetector:
 
     def detect_passes(self, possession_events: List[Dict], field_coords_players: Dict,
                      team_assignments: Dict, fps: float = 30, ball_field_coords: Dict = None,
-                     ball_assignments: Dict = None, id_mapping: Dict = None) -> List[Dict]:
+                     ball_assignments: Dict = None, id_mapping: Dict = None,
+                     team_override: Optional[Dict[int, int]] = None) -> List[Dict]:
         """
         Detect passes with enhanced trajectory validation.
 
@@ -404,26 +412,44 @@ class EnhancedPassDetector:
                 continue
 
             # Team validation (multi-level)
-            passer_team = self._get_player_team_robust(passer_id, passer_frame, team_assignments, window=50)
-            receiver_team = self._get_player_team_robust(receiver_id, receiver_frame, team_assignments, window=50)
+            passer_team = self._get_player_team_robust(
+                passer_id, passer_frame, team_assignments, window=50, team_override=team_override
+            )
+            receiver_team = self._get_player_team_robust(
+                receiver_id, receiver_frame, team_assignments, window=50, team_override=team_override
+            )
 
+            range_team_override = None
+            fixed_passer_id = id_mapping.get(passer_id, passer_id) if id_mapping else passer_id
+            fixed_receiver_id = id_mapping.get(receiver_id, receiver_id) if id_mapping else receiver_id
             if passer_team is None or receiver_team is None:
                 print(f"        [WARNING] P{passer_id}→P{receiver_id}: Missing team data (teams: {passer_team}, {receiver_team})")
                 confidence *= 0.5  # Reduce confidence but don't reject
             elif passer_team != receiver_team:
-                rejected_team += 1
-                print(f"        [REJECTED] P{passer_id}({passer_team})→P{receiver_id}({receiver_team}): Different teams")
-                continue
+                # Fallback: check fixed-ID range (1-11 vs 12-22) to infer team if both in same range
+                range_team_passer = 0 if 1 <= fixed_passer_id <= 11 else 1
+                range_team_receiver = 0 if 1 <= fixed_receiver_id <= 11 else 1
+                if range_team_passer == range_team_receiver:
+                    range_team_override = range_team_passer
+                    print(f"        [INFO] P{passer_id}→P{receiver_id}: Team mismatch overridden by fixed-ID range ({range_team_override})")
+                    confidence *= 0.8  # Slight penalty for override
+                else:
+                    rejected_team += 1
+                    print(f"        [REJECTED] P{passer_id}({passer_team})→P{receiver_id}({receiver_team}): Different teams")
+                    continue
 
             # Calculate final distance
             pass_distance = self._calculate_distance(passer_pos, receiver_pos)
+
+            if range_team_override is not None:
+                passer_team = receiver_team = range_team_override
 
             print(f"        [PASS ACCEPTED] P{passer_id}→P{receiver_id}: {pass_distance:.1f}m, conf={confidence:.2f}, teams={passer_team}→{receiver_team}")
 
             # Apply ID mapping if available to convert ByteTrack IDs to fixed IDs
             if id_mapping is not None:
-                passer_id = id_mapping.get(passer_id, passer_id)
-                receiver_id = id_mapping.get(receiver_id, receiver_id)
+                passer_id = fixed_passer_id
+                receiver_id = fixed_receiver_id
 
             # Create pass event
             pass_event = {
