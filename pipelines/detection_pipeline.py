@@ -7,9 +7,7 @@ images, and real-time streams. Core detection functions are in detect_players.py
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
-
 import numpy as np
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 

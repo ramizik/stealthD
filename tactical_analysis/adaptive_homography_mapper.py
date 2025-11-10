@@ -3,13 +3,6 @@
 Builds per-frame homographies with intelligent fallbacks for tactical
 camera recordings with panning/zooming motion.
 
-STABILITY ENHANCEMENTS (SoccerNet Best Practices):
-- Normalization transform for numerical stability (SoccerNet baseline)
-- PnP refinement with Levenberg-Marquardt optimization
-- Temporal homography smoothing (EMA) to prevent matrix instability
-- Position validation with bounds checking
-- Per-player position smoothing to reduce jitter
-- Homography validation before use
 """
 
 import sys
@@ -177,10 +170,6 @@ class AdaptiveHomographyMapper:
     def add_frame_data(self, frame_idx: int, keypoints: 'sv.KeyPoints'):
         """
         Add detected keypoints for a frame.
-
-        ROBOFLOW/SPORTS APPROACH:
-        Uses sv.KeyPoints object with .xy property and applies mask to BOTH
-        source and target simultaneously to maintain index alignment.
 
         ADAPTIVE DETECTION:
         Automatically detects incompatible camera angles and switches to
@@ -365,9 +354,7 @@ class AdaptiveHomographyMapper:
 
     def _build_frame_homography(self, frame_idx: int, keypoints: List[Tuple]) -> bool:
         """
-        Build homography matrix for a single frame WITH SOCCERNET ENHANCEMENTS.
-
-        Implements SoccerNet best practices + stability improvements:
+        Build homography matrix for a single frame
         1. Normalization transform for numerical stability (SoccerNet baseline)
         2. Homography validation before use
         3. Optional PnP refinement for accuracy
@@ -437,10 +424,6 @@ class AdaptiveHomographyMapper:
                     print(f"[Adaptive Homography] Frame {frame_idx}: H_raw is None")
                 return False
 
-            # ROBOFLOW/SPORTS: No validation - just use homography!
-            # They trust RANSAC to filter outliers, validation often rejects good matrices
-            # due to coordinate system differences (cm vs pixels vs normalized)
-
             # ENHANCED VALIDATION: Use geometric validation instead of numerical
             # This works regardless of coordinate system scaling and avoids the
             # condition number mismatch that was causing 100% validation failure
@@ -449,7 +432,6 @@ class AdaptiveHomographyMapper:
                     print(f"[Adaptive Homography] Frame {frame_idx}: ⚠️ Geometric validation failed")
                 return False
 
-            # SOCCERNET ENHANCEMENT: Optional PnP refinement for better accuracy
             # Only refine if we have good keypoint coverage
             if len(keypoints) >= 8:  # Need reasonable number for refinement
                 pitch_3d = np.c_[pitch_points, np.zeros(len(pitch_points))]
@@ -475,7 +457,7 @@ class AdaptiveHomographyMapper:
                 if frame_idx < 10 or frame_idx % 50 == 0:  # Log some boundaries
                     print(f"[Adaptive Homography] Frame {frame_idx}: 🎬 Shot boundary detected - resetting temporal smoothing")
 
-            # STEP 1: Add to buffer for MEDIAN FILTERING (like BallTracker)
+            # STEP 1: Add to buffer for MEDIAN FILTERING
             self.H_buffer.append(H_raw)
 
             # Apply median filtering if we have enough history
@@ -562,7 +544,7 @@ class AdaptiveHomographyMapper:
                     # LARGE change (like frame 528-529) - use aggressive smoothing
                     if num_keypoints >= 20:
                         is_scene_change = True
-                        alpha = 0.08  # 8% new, 92% old - MUCH MORE AGGRESSIVE
+                        alpha = 0.08 
 
                         # DEBUG: Always log frames 200-220 to catch Player 19/20 jumps
                         if frame_idx < 10 or (self.homography_success_count < 20 and is_scene_change) or (200 <= frame_idx <= 220):

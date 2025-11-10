@@ -7,10 +7,8 @@ high-level interfaces for keypoint-based analysis.
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 import cv2
 import numpy as np
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 

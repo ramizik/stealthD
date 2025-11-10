@@ -8,7 +8,6 @@ fixed pixel vertices and getPerspectiveTransform for court coordinate transforma
 import numpy as np
 import cv2
 
-
 class ViewTransformer:
     """
     Simple ViewTransformer using fixed vertices and getPerspectiveTransform.

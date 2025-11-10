@@ -7,7 +7,6 @@ Trained models will be saved to Models/Trained folder in repo root.
 
 import argparse
 from pathlib import Path
-
 import yaml
 from ultralytics import YOLO
 

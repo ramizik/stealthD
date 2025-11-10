@@ -12,14 +12,11 @@ STABILITY ENHANCEMENTS:
 
 import sys
 from pathlib import Path
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 from typing import Dict, List, Optional, Tuple
-
 import numpy as np
-
 from tactical_analysis.position_smoother import PlayerPositionSmoother
 
 
@@ -292,7 +289,7 @@ class SpeedCalculator:
             speeds = []
             valid_speeds = []  # For averaging
 
-            
+
             for i in range(1, len(frame_indices)):
                 prev_frame = frame_indices[i-1]
                 curr_frame = frame_indices[i]

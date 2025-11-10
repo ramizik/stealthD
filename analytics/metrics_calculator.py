@@ -7,13 +7,11 @@ to generate comprehensive match analytics.
 
 import sys
 from pathlib import Path
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 import gc
 from typing import Dict, Tuple, Optional
-
 import numpy as np
 import supervision as sv
 

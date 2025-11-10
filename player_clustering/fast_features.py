@@ -8,7 +8,6 @@ import numpy as np
 import supervision as sv
 from PIL import Image
 
-
 class FastFeatureExtractor:
     """
     Extract fast color-based features for team assignment.

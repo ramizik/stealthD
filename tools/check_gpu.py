@@ -1,12 +1,10 @@
 """
 GPU Diagnostic Script for Soccer Analysis System
-
 Run this script to verify your GPU setup before running the main analysis.
 """
 
 import sys
 from pathlib import Path
-
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -32,12 +30,12 @@ def main():
         print(f"✓ GPU Device Count: {torch.cuda.device_count()}")
         print(f"✓ Current GPU Device: {torch.cuda.current_device()}")
         print(f"✓ GPU Device Name: {torch.cuda.get_device_name(0)}")
-        
+
         # Get GPU properties
         props = torch.cuda.get_device_properties(0)
         print(f"✓ GPU Memory: {props.total_memory / 1024**3:.2f} GB")
         print(f"✓ GPU Compute Capability: {props.major}.{props.minor}")
-        
+
         # Test GPU memory allocation
         try:
             test_tensor = torch.randn(1000, 1000, device='cuda')
@@ -99,14 +97,14 @@ def main():
             from player_detection import load_detection_model
             model = load_detection_model(str(model_path))
             print(f"✓ Model device: {model.device}")
-            
+
             # Test inference
             import numpy as np
             test_frame = np.random.randint(0, 255, (640, 640, 3), dtype=np.uint8)
             print(f"  Running test inference...")
             results = model(test_frame, verbose=False)
             print(f"✓ Test inference completed successfully on GPU")
-            
+
         except Exception as e:
             print(f"✗ Model loading/inference failed: {e}")
             import traceback

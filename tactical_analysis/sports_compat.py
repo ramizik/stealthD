@@ -1,6 +1,4 @@
 """
-Custom implementation to replace the missing 'sports' module functionality.
-
 This module provides ViewTransformer, SoccerPitchConfiguration, and draw_pitch
 functions that were originally part of the sports module in older supervision versions.
 """
@@ -10,21 +8,12 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-
 class ViewTransformer:
     """
     ViewTransformer for perspective transformation using homography.
-
-    ROBOFLOW/SPORTS APPROACH:
-    Uses cv2.findHomography() with RANSAC (default) for robust outlier rejection.
-    This is critical for handling noisy keypoint detections in real-world footage.
-
-    The roboflow/sports library uses:
-        self.m, _ = cv2.findHomography(source, target)
-
     Which defaults to cv2.RANSAC with threshold 3.0 when more than 4 points.
 
-    Uses findHomography (not getPerspectiveTransform) to handle varying numbers
+    Uses findHomography to handle varying numbers
     of visible keypoints (4 to 32) as camera pans and zooms during the match.
     """
 
@@ -122,8 +111,7 @@ class SoccerPitchConfiguration:
     Pitch dimensions: 105m x 68m (FIFA standard)
     Coordinate system: 12000 x 7000 units (centimeters - ROBOFLOW/SPORTS STANDARD)
 
-    CRITICAL: Uses centimeters (12000 x 7000) to match roboflow/sports exactly.
-    This is the correct scale - homography works with these coordinates.
+    Uses centimeters (12000 x 7000) as homography works with these coordinates.
     """
 
     def __init__(self):

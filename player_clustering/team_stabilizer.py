@@ -12,7 +12,6 @@ from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 

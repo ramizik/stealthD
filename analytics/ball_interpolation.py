@@ -7,12 +7,10 @@ detection failed, improving ball tracking continuity.
 
 import sys
 from pathlib import Path
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_DIR))
 
 from typing import Dict, Optional
-
 import numpy as np
 
 

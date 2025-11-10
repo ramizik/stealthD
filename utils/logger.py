@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-
 class GoalkeeperLogger:
     """
     Dedicated logger for goalkeeper debugging that writes to a separate file.

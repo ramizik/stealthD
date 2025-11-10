@@ -24,8 +24,6 @@ For automatic model download, run:
 
 import sys
 from pathlib import Path
-
-# Project root directory
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_DIR))
 
@@ -48,7 +46,7 @@ model_path = PROJECT_DIR / model_path
 
 # Input test video pathcl
 # UPDATE THIS: Point to your actual test video file
-test_video = PROJECT_DIR / r"input_videos\sample_1.mp4"
+test_video = PROJECT_DIR / r"input_videos\sample_7.mp4"
 
 # Alternative video paths (examples)
 # test_video = PROJECT_DIR / "test_videos/sample.mp4"

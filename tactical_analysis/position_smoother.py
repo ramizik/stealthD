@@ -4,16 +4,11 @@ Smooths player positions AFTER homography transformation to handle:
 - Non-linear perspective transformation discontinuities
 - Matrix-level smoothing limitations
 - Per-player trajectory coherence
-
-This is the CRITICAL missing piece - matrix smoothing alone cannot prevent
-position jumps due to the non-linear nature of cv2.perspectiveTransform.
 """
 
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
-
 import numpy as np
-
 
 class SimpleKalmanFilter:
     """
