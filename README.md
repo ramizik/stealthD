@@ -2,6 +2,11 @@
 
 Computer-vision pipeline for soccer: detects players/ball/referees, tracks entities, maps them to pitch coordinates, and generates metrics and context-aware insights.
 
+
+## Demo
+
+Here should be a demo
+
 ### Run Locally
 - Prereqs: Python 3.11+, Windows/macOS/Linux, optional NVIDIA GPU.
 - Setup:
